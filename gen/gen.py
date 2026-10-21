@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Generate build/kernels.s, build/kernels.inc and build/kernels.json."""
+"""Generate build/kernels.{s,inc,json} and build/rings.inc."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from emit import emit_file, emit_metadata, emit_registry  # noqa: E402
+from emit import emit_file, emit_metadata, emit_registry, emit_rings  # noqa: E402
 
 MODULES = [
     "tests_sanity",
@@ -32,9 +32,11 @@ def main() -> int:
     if "tests_sanity" not in modules:
         modules = ["tests_sanity"] + modules
     kernels = []
+    rings = []
     for name in modules:
         mod = importlib.import_module(name)
         kernels.extend(mod.kernels())
+        rings.extend(getattr(mod, "RINGS", []))
 
     seen = set()
     for k in kernels:
@@ -47,6 +49,8 @@ def main() -> int:
         f.write(emit_file(kernels))
     with open(os.path.join(args.outdir, "kernels.inc"), "w") as f:
         f.write(emit_registry(kernels))
+    with open(os.path.join(args.outdir, "rings.inc"), "w") as f:
+        f.write(emit_rings(rings))
     with open(os.path.join(args.outdir, "kernels.json"), "w") as f:
         f.write(emit_metadata(kernels))
 

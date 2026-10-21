@@ -6,13 +6,13 @@ ONLY ?=
 
 all: build/probe
 
-build/kernels.s build/kernels.inc build/kernels.json: gen/*.py
+build/kernels.s build/kernels.inc build/kernels.json build/rings.inc: gen/*.py
 	python3 gen/gen.py --outdir build $(foreach m,$(ONLY),--only $(m))
 
 build/kernels.o: build/kernels.s
 	$(AS) -x $< -o $@
 
-build/probe: harness/probe.c harness/scratch.c harness/*.h build/kernels.inc build/kernels.o
+build/probe: harness/probe.c harness/scratch.c harness/*.h build/kernels.inc build/rings.inc build/kernels.o
 	$(CC) $(CFLAGS) -static -o $@ harness/probe.c harness/scratch.c build/kernels.o
 
 clean:
