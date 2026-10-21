@@ -72,7 +72,8 @@ class Bundle:
             if s is None:
                 s = NOP[unit]
             stop = s.rstrip().endswith(";;")
-            if stop and i != 2 and MID_STOP.get(tmpl) != i:
+            last = 1 if tmpl == "mlx" else 2
+            if stop and i != last and MID_STOP.get(tmpl) != i:
                 raise ValueError(f"{tmpl}: no stop after slot {i}: {s}")
             self.slots.append(s)
 
