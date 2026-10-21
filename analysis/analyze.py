@@ -5,7 +5,13 @@
 cycles per body = (t(2B) - t(B)) * ratio / (iters * B)
 
 where t is the minimum over repetitions and ratio converts ar.itc ticks to
-core cycles (1 for the model, whose log is in cycles already).
+core cycles (1 for the model, whose log is in cycles already).  A kernel
+whose line state is bimodal can take each count's minimum from a different
+mode (st_bi_stld_next_cold).  With --med the hardware value is the median
+of each repetition's t(2B) - t(B) where the probe recorded them, leaving
+out the negative ones, where the B call started slow (st_stld_next), and
+otherwise the medians' difference where that differs from the minimums' by
+more than the tolerance.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ import argparse
 import json
 
 
-def load(path: str) -> dict[str, float]:
+def load(path: str, tol: float = 0.0) -> dict[str, float]:
     out = {}
     try:
         lines = open(path).read().splitlines()
@@ -25,6 +31,13 @@ def load(path: str) -> dict[str, float]:
             continue
         r = json.loads(l)
         d = (r["min"][1] - r["min"][0]) * r["ratio"]
+        if tol and "d" in r:
+            v = sorted(x for x in r["d"] if x > 0) or sorted(r["d"])
+            d = v[len(v) // 2] * r["ratio"]
+        elif tol and "med" in r:
+            m = (r["med"][1] - r["med"][0]) * r["ratio"]
+            if abs(d - m) > tol * abs(m):
+                d = m
         out[r["name"]] = d / (r["iters"] * r["bodies"])
     return out
 
@@ -38,11 +51,13 @@ def main() -> int:
                     help="relative tolerance for agreement")
     ap.add_argument("--diff", action="store_true",
                     help="only kernels where the model and hardware differ")
+    ap.add_argument("--med", action="store_true",
+                    help="use the paired differences' median (see above)")
     ap.add_argument("prefix", nargs="*")
     args = ap.parse_args()
 
     meta = json.load(open(args.meta))
-    hw, sim = load(args.hw), load(args.sim)
+    hw, sim = load(args.hw, args.tol if args.med else 0.0), load(args.sim)
     print(f"{'kernel':34} {'claim':>7} {'hw':>8} {'model':>8}  verdict")
     for name, m in meta.items():
         if args.prefix and not any(name.startswith(p) for p in args.prefix):

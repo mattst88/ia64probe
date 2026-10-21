@@ -10,7 +10,9 @@
  * each of the four: an interrupt can only add ticks.  The calibration pair
  * is a chain of dependent adds of known length, so its differential gives
  * core cycles per ITC tick at the clock the kernel ran at.  The median is
- * reported too, so a minimum that does not reproduce is visible.
+ * reported too, so a minimum that does not reproduce is visible, and so is
+ * each repetition's 2B - B: a kernel whose line state is bimodal can take
+ * the two minimums from different modes.
  *
  * With --sim the program runs each kernel --reps times and prints which, in
  * order; the ia64perf plugin's itc= log has the modeled cycle at each ar.itc
@@ -126,6 +128,7 @@ main(int argc, char **argv)
 	const struct kernel *calb = find("cal_add", 32);
 	const struct kernel *cal2b = find("cal_add", 64);
 	uint64_t *v = calloc(4 * reps, sizeof *v);
+	long long *d = calloc(reps, sizeof *d);
 
 	if (!sim)
 		warm(0.5);
@@ -166,6 +169,9 @@ main(int argc, char **argv)
 			}
 		}
 		uint64_t md[4];
+		/* median() sorts, so take the pairs' differences first. */
+		for (unsigned r = 0; r < reps; r++)
+			d[r] = (long long)(v[3 * reps + r] - v[2 * reps + r]);
 		for (int j = 0; j < 4; j++)
 			md[j] = median(v + j * reps, reps);
 		/* cal_add runs 8 dependent adds per body. */
@@ -173,13 +179,16 @@ main(int argc, char **argv)
 		printf("{\"name\": \"%s\", \"bodies\": %u, \"iters\": %lu, "
 		       "\"min\": [%llu, %llu], \"med\": [%llu, %llu], "
 		       "\"cal_min\": [%llu, %llu], \"cal_med\": [%llu, %llu], "
-		       "\"ratio\": %.6f}\n",
+		       "\"ratio\": %.6f, \"d\": [",
 		       kb->name, kb->bodies, iters,
 		       (unsigned long long)mn[2], (unsigned long long)mn[3],
 		       (unsigned long long)md[2], (unsigned long long)md[3],
 		       (unsigned long long)mn[0], (unsigned long long)mn[1],
 		       (unsigned long long)md[0], (unsigned long long)md[1],
 		       calcyc / (double)(mn[1] - mn[0]));
+		for (unsigned r = 0; r < reps; r++)
+			printf("%s%lld", r ? ", " : "", d[r]);
+		printf("]}\n");
 		fflush(stdout);
 	}
 	return 0;
