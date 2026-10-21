@@ -232,6 +232,17 @@ for state, pre in (("warm", WARM), ("cold", COLD)):
     STORES[f"bi_st8ld8_0_64_{state}"] = ([
         one("m", "st8 [r33] = r34"), one("m", "ld8 r34 = [r36]")],
         ["adds r36 = 64, r33"] + pre)
+# bi_stld_next_cold and st_pair_st1ld1 with the load D bytes past the store:
+# in its 16-byte L2 bank (bits 7:4), another bank of its line, or its bank
+# in another line.  Which match makes a cold load wait?
+for d in (8, 16, 32, 64, 128, 256, 4096):
+    STORES[f"stld_d{d}_cold"] = ([
+        one("m", "st8 [r33] = r34"), one("m", "ld8 r34 = [r36]")],
+        ["movl r18 = %d" % d, "add r36 = r33, r18"] + COLD)
+    STORES[f"stld_same_d{d}_cold"] = ([
+        B("mmi", "st8 [r33] = r34", "ld8 r34 = [r36]", "nop.i 0 ;;")],
+        ["movl r18 = %d" % d, "add r36 = r33, r18"] + COLD)
+
 # A store then, K-1 groups on, a load of the next word of the line, with
 # the line cold (flushed) or warm: how far apart they must be for the load's
 # fill to survive the next store.
@@ -257,6 +268,73 @@ for line in (0, 1, 2, 3, 8):
             [one("m", "ld8 r45 = [r36]"), one("m", "st8 [r37] = r40")],
             [f"adds r36 = {64 * line + ld}, r33",
              f"adds r37 = {64 * line + sto}, r33"])
+
+# sha_stream's byte reverse as clang schedules it: ld1 each byte b of a
+# doubleword through its own post-incremented pointer (r80+b), st1 it to
+# its swap partner in the same 32-bit half (r88+b) a group or a body later.
+# The middle group stores two pairs and then loads the other two.  Through
+# a stream of new doublewords; through one 64-byte block, eight doublewords
+# a body; and through that block after eight st8s rewrite it, as
+# sha_update's memcpy does before each byte_reverse.
+def brev_element(loads=True, stores=True):
+    L = [f"r{80 + b}" for b in range(8)]
+    S = [f"r{88 + b}" for b in range(8)]
+    D = [f"r{60 + b}" for b in range(8)]
+    ld = lambda b: f"ld1 {D[b]} = [{L[b]}], 8" if loads else None
+    sto = lambda b: f"st1 [{S[b]}] = {D[b]}, 8" if stores else None
+    return [B("mmi", sto(2), sto(1), "nop.i 0"),
+            B("mmi", ld(7), ld(4), "nop.i 0"),
+            B("mmi", ld(6), ld(5), "nop.i 0 ;;"),
+            B("mmi", sto(4), sto(7), "nop.i 0"),
+            B("mmi", ld(3), ld(0), "nop.i 0"),
+            B("mmi", sto(6), sto(5), "nop.i 0"),
+            B("mmi", ld(2), ld(1), "nop.i 0 ;;"),
+            B("mmi", sto(3), sto(0), "nop.i 0 ;;")]
+
+
+BSWAP = {0: 3, 1: 2, 2: 1, 3: 0, 4: 7, 5: 6, 6: 5, 7: 4}
+BREV_SETUP = ([f"adds r{80 + b} = {64 + b}, r34" for b in range(8)]
+              + [f"adds r{88 + b} = {64 + BSWAP[b] - (8 if b in (1, 2) else 0)}"
+                 ", r34" for b in range(8)])
+BREV_RESET = [B("mii", f"adds r{80 + i} = -64, r{80 + i}",
+                f"adds r{81 + i} = -64, r{81 + i}",
+                f"adds r{82 + i} = -64, r{82 + i}" + (" ;;" if i % 6 == 3
+                                                       else ""))
+              for i in range(0, 15, 3)] + [
+    B("mii", "adds r95 = -64, r95", None, "nop.i 0 ;;")]
+BREV_COPY = [B("mmi", f"st8 [r{96 + i}] = r40", f"st8 [r{97 + i}] = r40",
+               "nop.i 0 ;;") for i in range(0, 8, 2)]
+STORES["brev_stream"] = (brev_element(), BREV_SETUP)
+# Its loads alone, its stores alone, and both with the loads 32 KB away.
+STORES["brev_stream_ld"] = (brev_element(stores=False), BREV_SETUP)
+STORES["brev_stream_st"] = (brev_element(loads=False), BREV_SETUP)
+STORES["brev_stream_far"] = (brev_element(), [
+    "movl r18 = 0x8000", "add r19 = r34, r18"] + [
+    l.replace(", r34", ", r19") for l in BREV_SETUP[:8]] + BREV_SETUP[8:])
+# Both, with the loads K doublewords ahead of the stores: in the doubleword
+# after, another 16-byte bank, or the next line.
+for k in (1, 2, 4, 8, 16):
+    STORES[f"brev_stream_a{k}"] = (brev_element(), [
+        f"adds r{80 + b} = {64 + 8 * k + b}, r34" for b in range(8)]
+        + BREV_SETUP[8:])
+# One doubleword's eight st1s two a group, and one a group, in brev's order
+# and ascending; and eight st1s to eight doublewords' byte 0.
+BREV_ORDER = [2, 1, 4, 7, 6, 5, 3, 0]
+for name, order in (("brev", BREV_ORDER), ("up", list(range(8)))):
+    STORES[f"w8_{name}_two"] = ([
+        B("mmi", f"st1 [r{88 + order[i]}] = r40, 8",
+          f"st1 [r{88 + order[i + 1]}] = r40, 8", "nop.i 0 ;;")
+        for i in range(0, 8, 2)], BREV_SETUP)
+    STORES[f"w8_{name}_one"] = ([one("m", f"st1 [r{88 + b}] = r40, 8")
+                                 for b in order], BREV_SETUP)
+STORES["w8_spread"] = ([one("m", f"st1 [r{88 + b}] = r40, 64")
+                        for b in range(8)],
+                       [f"adds r{88 + b} = {8 * b}, r34" for b in range(8)])
+# Eight doublewords a body: too long for STORES' eight bodies.
+BLOCKS = {"brev_block": (brev_element() * 8 + BREV_RESET, BREV_SETUP)}
+BLOCKS["brev_block_copy"] = (BREV_COPY + brev_element() * 8 + BREV_RESET,
+                             BREV_SETUP + [f"adds r{96 + i} = {64 + 8 * i}, r34"
+                                           for i in range(8)])
 
 # Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
 # ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
@@ -620,6 +698,8 @@ def kernels():
                    teardown=RING_TEARDOWN)
     for name, (body, setup) in STORES.items():
         ks += pair(f"st_{name}", "memory", body, SSETUP + setup)
+    for name, (body, setup) in BLOCKS.items():
+        ks += pair(f"st_{name}", "memory", body, SSETUP + setup, bodies=2)
     # The ld8/st8 pair of one address, and mtfv's walk, as the store setup
     # leaves them, with 8 empty groups after its st8 [r33], and without
     # it: does that store, a cycle or two before the first load of r33,
