@@ -3,7 +3,8 @@
 """Run build/probe under qemu-ia64 with the ia64perf cycle model.
 
 The plugin logs the modeled cycle at each ar.itc read; every kernel call
-reads it twice, and the probe prints which kernel each call was, so the log
+reads it twice, plus any reads its body makes (itc_reads_per_body in the
+metadata), and the probe prints which kernel each call was, so the log
 pairs up with the calls in order.  Writes one JSON line per kernel pair in
 the same shape as the hardware results, with ratio 1 (the log is already in
 cycles).
@@ -26,6 +27,7 @@ QEMU = os.environ.get("QEMU", f"{HOME}/projects/qemu-ia64/build/qemu-ia64")
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", default="build/probe")
+    ap.add_argument("--meta", default="build/kernels.json")
     ap.add_argument("--out", default="results/sim.jsonl")
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--perfargs", default=",pref=1")
@@ -46,13 +48,21 @@ def main() -> int:
         stamps = [int(x) for x in open(log).read().split()]
     calls = [l.split() for l in res.stdout.splitlines()
              if l.startswith("call ")]
-    if len(stamps) != 2 * len(calls):
-        raise SystemExit(f"{len(stamps)} itc reads for {len(calls)} calls")
+    meta = json.load(open(args.meta))
+    spans = []
+    for _, name, bodies, iters in calls:
+        inner = meta[name].get("itc_reads_per_body", 0)
+        spans.append(2 + inner * int(bodies) * int(iters))
+    if len(stamps) != sum(spans):
+        raise SystemExit(f"{len(stamps)} itc reads for {len(calls)} calls, "
+                         f"expected {sum(spans)}")
     best: dict[tuple[str, int], tuple[int, int]] = {}
     order = []
-    for i, (_, name, bodies, iters) in enumerate(calls):
+    at = 0
+    for (_, name, bodies, iters), n in zip(calls, spans):
         key = (name, int(bodies))
-        dt = stamps[2 * i + 1] - stamps[2 * i]
+        dt = stamps[at + n - 1] - stamps[at]
+        at += n
         if key not in best:
             order.append(key)
             best[key] = (dt, int(iters))
