@@ -146,6 +146,9 @@ main(int argc, char **argv)
 				printf("call %s %u %lu\n", k2b->name,
 				       k2b->bodies, iters);
 			}
+			/* As the timed runs below do: the write between
+			 * kernels is part of what each one starts from. */
+			fflush(stdout);
 			continue;
 		}
 		uint64_t mn[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
