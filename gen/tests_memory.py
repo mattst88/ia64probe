@@ -17,12 +17,14 @@ M + 1 (FP loads skip L1D) plus getf's 6 to an address.
 st_*: stores, and loads and stores together: store throughput (same, seq,
 gap, alt), store-to-load forwarding (stld, 251110-003 Table 6-5), loads
 and stores in one group (mtf, pair), the L1D fill a store cancels (bi,
-251110-003 6.6.3.2), and ALAT entries a store kills (alat: the ALAT
-compares address bits 11:3 only).  Then 1- and 2-byte stores to one word,
-which leave the store queue 5 cycles apart (seqst, st1st8, st8st1), and how
-many queue before the pipeline waits (strun, stq, stqw: about 18); glibc's
-byte copy loop (copy1, copyrun), and a load in a store's group with the
-same address bits 11:2 (alias).
+251110-003 6.6.3.2), and ALAT entries a store kills (alat, alat1, alatd:
+the ALAT compares the bytes in address bits 11:0 only).  Then 1- and 2-byte
+stores to one word, which leave the store queue 5 or 6 cycles apart (seqst,
+st1st8, st8st1, zst, zsq, zsqw), and how many queue before the pipeline
+waits (strun, stq, stqw: about 18); glibc's byte copy loop (copy1,
+copyrun), a load in a store's group with the same address bits 11:2
+(alias), and zstd's match copies (zcopy, zmatch, zline, zlg, zbyte, qld,
+ldst), whose loads of lines that stores missed L2 in wait for them.
 """
 
 from emit import Bundle as B, pair
@@ -339,11 +341,249 @@ for run in range(2, 9):
         [one("m", "st1 [r34] = r40, 1")] * run
         + [B("mmi", None, None, f"adds r34 = {8 - run}, r34 ;;")]
         + [GAP] * 47, [])
+# The strun4_g16 drain with loads in the groups after the stores: from a
+# warm line elsewhere (r33), from the stored line's next word, and an
+# integer op standing for the rest.  Does a load wait for the queue?
+for run in (4, 8):
+    for kind, text in (("ldfar", "ld8 r41 = [r33]"),
+                       ("ldline", "ld8 r41 = [r35]"),
+                       ("ld1far", "ld1 r41 = [r33]"),
+                       ("add", None)):
+        g = (one("m", text) if text else
+             B("mmi", None, None, "add r41 = r40, r40 ;;"))
+        STORES[f"strun{run}_{kind}"] = (
+            [one("m", "st1 [r34] = r40, 1")] * run + [g] * 16,
+            ["adds r35 = 8, r34"] + WARM)
+# aes's in-place byte loop (decfile): load a byte, then store it back a
+# group after the next, so the next load reads the word the store is
+# queued for.  _far loads from a stream 64 bytes on instead; _dep makes the
+# store's data the load's.
+for name, ld, setup in (("same", "ld1 r40 = [r34], 1", []),
+                        ("far", "ld1 r40 = [r27], 1", ["adds r27 = 64, r34"])):
+    for dep in ("", "_dep"):
+        STORES[f"inplace_{name}{dep}"] = (
+            [one("m", ld), B("mmi", None, None, "adds r41 = -1, r34 ;;"
+                             if name == "same" else "nop.i 0 ;;"),
+             one("m", (f"st1 [r41] = {'r40' if dep else 'r42'}"
+                       if name == "same" else
+                       f"st1 [r34] = {'r40' if dep else 'r42'}, 1"))],
+            setup + ["mov r42 = 0"])
+# The same in runs of RUN bytes, then 16 empty groups, as decfile's
+# 16-byte blocks between calls.
+for run in (1, 2, 4, 8, 16):
+    STORES[f"inplace_run{run}"] = (
+        [one("m", "ld1 r40 = [r34], 1"),
+         B("mmi", None, None, "adds r41 = -1, r34 ;;"),
+         one("m", "st1 [r41] = r40")] * run + [GAP] * 16,
+        ["mov r42 = 0"])
+# The same over one warm block, back to its start every body.
+for run in (1, 2, 4, 8, 16):
+    for dep in ("", "_nodep"):
+        STORES[f"inplace_warm{run}{dep}"] = (
+            [one("m", "ld1 r40 = [r34], 1"),
+             B("mmi", None, None, "adds r41 = -1, r34 ;;"),
+             one("m", f"st1 [r41] = {'r42' if dep else 'r40'}")] * run
+            + [B("mmi", None, None, f"adds r34 = -{run}, r34 ;;")]
+            + [GAP] * 15,
+            ["mov r42 = 0"])
 # Without the store at all.
 STORES["alat_nostore"] = ([one("m", "ld8.a r34 = [r33]"), GAP,
                            one("m", "ld8.c.clr r34 = [r33]")], WARM)
 STORES["alat_nostore_nc"] = ([one("m", "ld8.a r34 = [r33]"), GAP,
                               one("m", "ld8.c.nc r34 = [r33]")], WARM)
+# clang's unrolled match copy in zstd: ld1.sa of byte 14 hoisted above the
+# copy, the first byte's load and store, and the check in the store's group
+# ("same") or the next ("next"), the store OFF bytes on from the source; "plain"
+# loads byte 14 again with a plain ld1, "nost" leaves the store out.
+for off in (16, 64, 4096 + 16):
+    for kind in ("same", "next", "plain", "nost"):
+        la, lc = ("ld1", "ld1") if kind == "plain" else ("ld1.sa", "ld1.c.clr")
+        stb = None if kind == "nost" else "st1 [r38] = r45"
+        tail = ([B("mmi", stb, None, "nop.i 0 ;;"), one("m", f"{lc} r44 = [r37]")]
+                if kind == "next" else
+                [B("mmi", stb, f"{lc} r44 = [r37]", "nop.i 0 ;;")])
+        STORES[f"zcopy_{kind}_o{off}"] = (
+            [one("m", f"{la} r44 = [r37]"), one("m", "ld1 r45 = [r33]")]
+            + tail + [one("m", "st1 [r39] = r44")],
+            ["adds r37 = 14, r33", f"movl r18 = {off}", "add r38 = r33, r18",
+             "adds r39 = 256, r33"] + WARM)
+# ld1.sa of byte 14 of a line, a st1 to byte K of it, then ld1.c.clr: which
+# byte stores kill the entry (the ld8 probes above store doublewords).
+for k in (0, 7, 8, 13, 14, 15, 16, 17, 22, 24, 31, 32, 40, 48, 63, 64):
+    STORES[f"alat1_k{k}"] = ([
+        one("m", "ld1.sa r44 = [r37]"), one("m", "st1 [r38] = r45"),
+        one("m", "ld1.c.clr r44 = [r37]"), one("m", "st1 [r39] = r44")],
+        ["adds r37 = 14, r33", f"adds r38 = {k}, r33",
+         "adds r39 = 256, r33", "mov r45 = 0"] + WARM)
+# A check GAP empty groups after its advanced load (0: the next group),
+# with a store to another line in the check's group or without.
+for sz in (1, 8):
+    for gap in (0, 1, 2, 3, 4, 6):
+        for stk in ("", "_st"):
+            stb = "st8 [r39] = r45" if stk else None
+            STORES[f"alatd{sz}_g{gap}{stk}"] = ([
+                one("m", f"ld{sz}.sa r44 = [r37]")] + [GAP] * gap + [
+                B("mmi", stb, f"ld{sz}.c.clr r44 = [r37]", "nop.i 0 ;;"),
+                one("m", "st8 [r38] = r44")],
+                ["mov r37 = r33", "adds r38 = 256, r33",
+                 "adds r39 = 512, r33", "mov r45 = 0"] + WARM)
+# The same copy in a stream: 16 bytes written with two st8, then bytes 0 and
+# 14 copied from OFF bytes behind the write pointer, as zstd's decoder copies
+# a match from output it wrote shortly before; "plain" without the advanced
+# load.
+for off in (16, 32, 64, 128, 256, 1024, 8192):
+    for kind in ("alat", "plain"):
+        la, lc = ("ld1.sa", "ld1.c.clr") if kind == "alat" else ("ld1", "ld1")
+        STORES[f"zmatch_{kind}_o{off}"] = ([
+            one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
+            B("mii", None, f"adds r37 = {14 - off}, r34",
+              f"adds r38 = {-off}, r34 ;;"),
+            one("m", f"{la} r44 = [r37]"), one("m", "ld1 r45 = [r38]"),
+            B("mmi", "st1 [r34] = r45", f"{lc} r44 = [r37]",
+              "adds r39 = 14, r34 ;;"),
+            B("mmi", "st1 [r39] = r44", None, "adds r34 = 16, r34 ;;")], [])
+# The same writing a new 128-byte L2 line each body, 1-2 MB a call, so every
+# line the stores reach misses L2.
+for off in (16, 32, 64, 128, 256, 1024):
+    STORES[f"zline_o{off}"] = ([
+        one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
+        B("mii", None, f"adds r37 = {14 - off}, r34",
+          f"adds r38 = {-off}, r34 ;;"),
+        one("m", "ld1 r44 = [r37]"), one("m", "ld1 r45 = [r38]"),
+        B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
+          "adds r39 = 14, r34 ;;"),
+        B("mmi", "st1 [r39] = r44", None, "adds r34 = 112, r34 ;;")], [])
+# With GAP empty groups between the stores and the loads: how long after
+# the store missed L2 a load of its line, or of the line before, still waits.
+for off in (16, 128):
+    for gap in (4, 8, 16, 24, 32, 40, 56):
+        STORES[f"zlg_o{off}_g{gap}"] = ([
+            one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
+            B("mii", None, f"adds r37 = {14 - off}, r34",
+              f"adds r38 = {-off}, r34 ;;")] + [GAP] * gap + [
+            one("m", "ld1 r44 = [r37]"), one("m", "ld1 r45 = [r38]"),
+            B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
+              "adds r39 = 14, r34 ;;"),
+            B("mmi", "st1 [r39] = r44", None, "adds r34 = 112, r34 ;;")], [])
+# The same with the write pointer back where it started each body, so every
+# line stays in L1D and L2.
+for off in (16, 32, 64, 256):
+    STORES[f"zmatch_warm_o{off}"] = ([
+        one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
+        B("mii", None, f"adds r37 = {14 - off}, r34",
+          f"adds r38 = {-off}, r34 ;;"),
+        one("m", "ld1 r44 = [r37]"), one("m", "ld1 r45 = [r38]"),
+        B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
+          "adds r39 = 14, r34 ;;"),
+        B("mmi", "st1 [r39] = r44", None, "adds r34 = -16, r34 ;;")], [])
+
+# zstd's 16-byte match copy as clang schedules it in ZSTD_decompressSequences:
+# byte 14 read ahead by ld1.sa, then sixteen ld1/st1 pairs two to a group, the
+# check of byte 14 in the group after the first store. The source is OFF bytes
+# behind the destination; "stream" writes on, "warm" rewrites the same 16.
+def zbyte(off, adv, step):
+    la, lc = ("ld1.sa", "ld1.c.clr") if adv else ("ld1", "ld1")
+    addrs = [B("mii", None, f"adds r{64 + i} = {i - off}, r34",
+               f"adds r{65 + i} = {i + 1 - off}, r34" + (" ;;" if i % 4 == 2
+                                                          else ""))
+             for i in range(0, 16, 2)]
+    addrs += [B("mii", None, f"adds r{80 + i} = {i}, r34",
+                f"adds r{81 + i} = {i + 1}, r34" + (" ;;" if i % 4 == 2
+                                                    else ""))
+              for i in range(0, 16, 2)]
+    ld = lambda i: f"ld1 r{44 + i} = [r{64 + i}]"
+    sb = lambda i: f"st1 [r{80 + i}] = r{44 + i}"
+    body = addrs + [
+        one("m", f"{la} r58 = [r78]"),
+        one("m", ld(0)),
+        B("mmi", ld(15), sb(0), "nop.i 0 ;;"),
+        B("mmi", f"{lc} r58 = [r78]", ld(13), "nop.i 0 ;;"),
+        B("mmi", f"st1 [r95] = r59", ld(11), "nop.i 0 ;;"),
+        B("mmi", "st1 [r94] = r58", ld(10), "nop.i 0 ;;"),
+        B("mmi", ld(8), sb(13), "nop.i 0 ;;"),
+        B("mmi", ld(12), ld(9), "nop.i 0 ;;"),
+        B("mmi", sb(11), ld(7), "nop.i 0 ;;"),
+        B("mmi", sb(10), ld(6), "nop.i 0 ;;"),
+        B("mmi", sb(8), ld(5), "nop.i 0 ;;"),
+        B("mmi", sb(12), ld(4), "nop.i 0 ;;"),
+        B("mmi", sb(9), ld(3), "nop.i 0 ;;"),
+        B("mmi", sb(7), ld(2), "nop.i 0 ;;"),
+        B("mmi", sb(6), ld(1), "nop.i 0 ;;"),
+        B("mmi", sb(5), sb(4), "nop.i 0 ;;"),
+        B("mmi", sb(3), sb(2), "nop.i 0 ;;"),
+        B("mmi", sb(1), None, f"adds r34 = {step}, r34 ;;")]
+    return body
+
+
+ZBYTE = {}
+for off in (16, 32, 64, 128, 1024):
+    for adv in (True, False):
+        for kind, step in (("stream", 16), ("warm", 0)):
+            ZBYTE[f"zbyte_{'alat' if adv else 'plain'}_{kind}_o{off}"] = (
+                zbyte(off, adv, step))
+# Only zbyte's stores, one a group, in its byte order, ascending or
+# descending; "pair" keeps zbyte's groups, two stores to one.
+ZORDER = {"z": [0, 15, 14, 13, 11, 10, 8, 12, 9, 7, 6, 5, 4, 3, 2, 1],
+          "up": list(range(16)), "down": list(range(15, -1, -1))}
+for oname, order in ZORDER.items():
+    for kind, step in (("stream", 16), ("warm", 0)):
+        addrs = [B("mii", None, f"adds r{80 + i} = {i}, r34",
+                   f"adds r{81 + i} = {i + 1}, r34" + (" ;;" if i % 4 == 2
+                                                       else ""))
+                 for i in range(0, 16, 2)]
+        ZBYTE[f"zst_{oname}_{kind}"] = addrs + [
+            one("m", f"st1 [r{80 + i}] = r40") for i in order] + [
+            B("mii", None, None, f"adds r34 = {step}, r34 ;;")]
+# zst_up_stream's 16 byte stores through one post-incremented pointer, with
+# zst's eight groups of adds in front or without them.
+for pre in ("", "_adds"):
+    addrs = [B("mii", None, f"adds r{80 + i} = {i}, r34",
+               f"adds r{81 + i} = {i + 1}, r34" + (" ;;" if i % 4 == 2
+                                                   else ""))
+             for i in range(0, 16, 2)] if pre else []
+    ZBYTE[f"zsq_post{pre}"] = addrs + [
+        one("m", "st1 [r34] = r40, 1") for i in range(16)]
+# A load of a doubleword stored behind B others in the queue: a fixed one
+# whose line a load keeps in L1D, or the last of a stream of new lines.
+for b in (0, 4, 8, 16):
+    ZBYTE[f"qld_fixed_b{b}"] = [one("m", "ld8 r45 = [r42]")] + [
+        one("m", "st8 [r34] = r40, 8")] * b + [
+        one("m", "st8 [r36] = r40"), one("m", "ld8 r44 = [r36]"),
+        B("mii", None, "add r46 = r44, r0", "nop.i 0 ;;")]
+    ZBYTE[f"qld_stream_b{b}"] = [one("m", "st8 [r34] = r40, 8")] * (b + 1) + [
+        B("mii", None, "adds r37 = -8, r34", "nop.i 0 ;;"),
+        one("m", "ld8 r44 = [r37]"),
+        B("mii", None, "add r46 = r44, r0", "nop.i 0 ;;")]
+# The same 16 bytes rewritten each body: through a post-incremented pointer
+# with or without zst's adds in front, or through address registers set up
+# once.
+ADDRS = [B("mii", None, f"adds r{80 + i} = {i}, r34",
+           f"adds r{81 + i} = {i + 1}, r34" + (" ;;" if i % 4 == 2 else ""))
+         for i in range(0, 16, 2)]
+for pre in ("", "_adds"):
+    ZBYTE[f"zsqw_post{pre}"] = (ADDRS if pre else []) + [
+        one("m", "st1 [r34] = r40, 1") for i in range(16)] + [
+        B("mii", None, None, "adds r34 = -16, r34 ;;")]
+ZBYTE["zsqw_regs"] = [one("m", f"st1 [r{80 + i}] = r40") for i in range(16)]
+ZBYTE["zsqw_regs_adds"] = [B("mii", None, "nop.i 0",
+                            "nop.i 0" + (" ;;" if i % 4 == 2 else ""))
+                          for i in range(0, 16, 2)] + ZBYTE["zsqw_regs"]
+# qld_fixed_b0's pieces: the load before the store gone, to another line, or
+# a group further away; and the store's load gone or its result unused.
+LDST = {"noa": [None, "st8 [r36] = r40", "ld8 r44 = [r36]", True],
+        "far": ["ld8 r45 = [r39]", "st8 [r36] = r40", "ld8 r44 = [r36]", True],
+        "gap": ["ld8 r45 = [r42]", None, "st8 [r36] = r40", "ld8 r44 = [r36]",
+                True],
+        "nold": ["ld8 r45 = [r42]", "st8 [r36] = r40", None, False],
+        "nouse": ["ld8 r45 = [r42]", "st8 [r36] = r40", "ld8 r44 = [r36]",
+                  False],
+        "same": ["ld8 r45 = [r42]", "st8 [r36] = r40", "ld8 r44 = [r36]",
+                 True]}
+for name, parts in LDST.items():
+    body = [one("m", p) if p else GAP for p in parts[:-1]]
+    if parts[-1]:
+        body.append(B("mii", None, "add r46 = r44, r0", "nop.i 0 ;;"))
+    ZBYTE[f"ldst_{name}"] = body
 
 def kernels():
     ks = []
@@ -370,6 +610,11 @@ def kernels():
                    teardown=RING_TEARDOWN)
     for name, (body, setup) in STORES.items():
         ks += pair(f"st_{name}", "memory", body, SSETUP + setup)
+    for name, body in ZBYTE.items():
+        ks += pair(f"st_{name}", "memory", body,
+                   SSETUP + ["adds r36 = 72, r33", "adds r39 = 256, r33"] +
+                   [f"adds r{80 + i} = {i}, r34" for i in range(16)],
+                   bodies=4)
     # Deeper than stq: RUN st1s over RUN/8 words, then enough groups to drain.
     for run in (8, 12, 16, 20, 24, 32):
         ks += pair(f"st_stqw{run}", "memory",
