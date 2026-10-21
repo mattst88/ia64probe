@@ -19,6 +19,7 @@ MODULES = [
     "tests_dispersal",
     "tests_waw",
     "tests_memory",
+    "tests_rse",
 ]
 
 
