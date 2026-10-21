@@ -126,8 +126,11 @@ class Kernel:
         out += ["\t" + s for s in self.setup]
         # Read the timer last, after every setup instruction has been
         # issued; the reads cancel in the differential.  In .auto mode gas
-        # places the stops itself.
+        # places the stops itself.  The read starts a bundle: qemu ends a
+        # translation block after a serialize (srlz.d) and runs the rest of
+        # its bundle again, which would log the read twice.
         out += [
+            "\t.align 16",
             "\tmov r14 = ar.itc",
             "\t.explicit",
             "\t.align 32",
