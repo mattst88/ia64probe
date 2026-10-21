@@ -18,6 +18,7 @@ MODULES = [
     "tests_latency",
     "tests_dispersal",
     "tests_waw",
+    "tests_memory",
 ]
 
 
