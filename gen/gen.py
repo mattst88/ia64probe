@@ -16,6 +16,8 @@ from emit import emit_file, emit_metadata, emit_registry  # noqa: E402
 MODULES = [
     "tests_sanity",
     "tests_latency",
+    "tests_dispersal",
+    "tests_waw",
 ]
 
 
