@@ -769,6 +769,17 @@ def kernels():
         ks += pair(f"chase_{name_of(size)}", "memory",
                    [one("m", "ld8 r34 = [r34]")], ring_setup(size), meta,
                    teardown=RING_TEARDOWN)
+    # An L2-resident chase behind K st1s to one word, and those st1s
+    # alone: does a load that misses L1D wait for the stores queued ahead?
+    for k in (1, 2, 4, 8):
+        sts = [one("m", "st1 [r36] = r40")] * k
+        ks += pair(f"qchase_k{k}", "memory",
+                   sts + [one("m", "ld8 r34 = [r34]")],
+                   ring_setup(128 * KB) + ["adds r36 = 72, r33"],
+                   teardown=RING_TEARDOWN)
+        ks += pair(f"qchase_k{k}_st", "memory", sts,
+                   ring_setup(128 * KB) + ["adds r36 = 72, r33"],
+                   teardown=RING_TEARDOWN)
     for size in SEQ:
         ks += pair(f"chase_seq_{name_of(size)}", "memory",
                    [one("m", "ld8 r34 = [r34]")], ring_setup(size, True),
