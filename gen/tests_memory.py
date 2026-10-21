@@ -698,7 +698,10 @@ for off in (16, 32, 64, 128, 1024):
 # Only zbyte's stores, one a group, in its byte order, ascending or
 # descending; "pair" keeps zbyte's groups, two stores to one.
 ZORDER = {"z": [0, 15, 14, 13, 11, 10, 8, 12, 9, 7, 6, 5, 4, 3, 2, 1],
-          "up": list(range(16)), "down": list(range(15, -1, -1))}
+          "up": list(range(16)), "down": list(range(15, -1, -1)),
+          "alt": [b for i in range(8) for b in (i, 8 + i)],
+          "alt2": [b for i in range(0, 8, 2) for b in (i, i + 1, 8 + i, 9 + i)],
+          "zc": [11, 0, 14, 15, 13, 12, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]}
 for oname, order in ZORDER.items():
     for kind, step in (("stream", 16), ("warm", 0)):
         addrs = [B("mii", None, f"adds r{80 + i} = {i}, r34",
@@ -708,6 +711,31 @@ for oname, order in ZORDER.items():
         ZBYTE[f"zst_{oname}_{kind}"] = addrs + [
             one("m", f"st1 [r{80 + i}] = r40") for i in order] + [
             B("mii", None, None, f"adds r34 = {step}, r34 ;;")]
+# Byte stores in a given order to offsets from r34, one a group, each
+# address in its own register; "stream" moves on by STEP each body.
+def zsx(offs, step):
+    n = len(offs)
+    addrs = [B("mii", None, f"adds r{80 + i} = {o}, r34",
+               "nop.i 0 ;;" if i % 4 == 3 else "nop.i 0")
+             for i, o in enumerate(offs)]
+    return {"stream": addrs + [one("m", f"st1 [r{80 + i}] = r40")
+                               for i in range(n)] + [
+                B("mii", None, None, f"adds r34 = {step}, r34 ;;")],
+            "warm": addrs + [one("m", f"st1 [r{80 + i}] = r40")
+                             for i in range(n)]}
+
+
+ZC = ZORDER["zc"]
+for oname, offs, step in (
+        ("alt3", [b for i in range(8) for b in (i, 8 + i, 16 + i)], 24),
+        ("altbank", [b for i in range(8) for b in (i, 16 + i)], 8),
+        ("altline", [b for i in range(8) for b in (i, 64 + i)], 8),
+        ("alt4", [b for h in (0, 4) for b in (h, h + 1, h + 2, h + 3,
+                                              8 + h, 9 + h, 10 + h, 11 + h)],
+         16),
+        ("zc2", ZC + [16 + b for b in ZC], 32)):
+    for kind, body in zsx(offs, step).items():
+        ZBYTE[f"zsx_{oname}_{kind}"] = body
 # zst_up_stream's 16 byte stores through one post-incremented pointer, with
 # zst's eight groups of adds in front or without them.
 for pre in ("", "_adds"):
