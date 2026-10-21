@@ -49,12 +49,14 @@ NOP = {"m": "nop.m 0", "i": "nop.i 0", "f": "nop.f 0", "b": "nop.b 0"}
 class Bundle:
     """One bundle: a template and three slot texts.
 
-    A slot text ending in ';;' puts a stop after it.  Slots given as None
+    A slot text ending in ';;' puts a stop after it.  label, a gas local
+    label such as "1", goes in front of the bundle, for a body with a loop
+    of its own.  Slots given as None
     are filled with the template's nop.  For mlx, slot 1 is the whole
     movl/brl and slot 2 must be None.
     """
 
-    def __init__(self, tmpl: str, *slots) -> None:
+    def __init__(self, tmpl: str, *slots, label: str | None = None) -> None:
         tmpl = tmpl.lower()
         if tmpl not in TEMPLATES:
             raise ValueError(f"unknown template {tmpl}")
@@ -62,6 +64,7 @@ class Bundle:
         if len(slots) != 3:
             raise ValueError(f"{tmpl}: {len(slots)} slots")
         self.tmpl = tmpl
+        self.label = label
         self.slots = []
         for i, s in enumerate(slots):
             if tmpl == "mlx" and i == 2:
@@ -85,7 +88,8 @@ class Bundle:
         return sum(1 for s in self.slots if not re.match(r"^\s*nop", s))
 
     def text(self) -> list[str]:
-        out = [f"\t{{ .{self.tmpl}"]
+        out = [f"{self.label}:"] if self.label else []
+        out += [f"\t{{ .{self.tmpl}"]
         out += [f"\t  {s}" for s in self.slots]
         out.append("\t}")
         return out
