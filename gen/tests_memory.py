@@ -5,15 +5,20 @@ chase_*: ld8 r34 = [r34] around a ring of pointers covering a region of the
 given size, one pointer per 128-byte line in a random order (the harness
 builds the rings; see harness/scratch.c).  The cycles per body are the load
 latency to an address consumer, N + 1 in 308065-001 Table 2-8, so N is one
-less: 1 for L1D, 5 for L2D, 14-15 for L3 and about 180-225 for memory.  The
-cache sizes are those the 9340 reports: L1D 16 KB, L2D 256 KB, L3 5 MB.
+less: 1 for L1D and 5 for L2D, as the table says; the 9340 measures 16 to
+19 for L3 (the table's 14-15 is Montecito's) and 310 to 330 for memory.
+The cache sizes are those the 9340 reports: L1D 16 KB, L2D 256 KB, L3 5 MB.
 Rings beyond 128 KB visit more 64 KB pages than the data TLB holds, so the
 large ones include TLB misses, as random accesses in real code do.
 
 fchase_*: the same with ldf8 and getf.sig, so N is replaced by an FP load's
 M + 1 (FP loads skip L1D) plus getf's 6 to an address.
 
-st_*: store throughput, measured only.
+st_*: stores, and loads and stores together: store throughput (same, seq,
+gap, alt), store-to-load forwarding (stld, 251110-003 Table 6-5), loads
+and stores in one group (mtf, pair), the L1D fill a store cancels (bi,
+251110-003 6.6.3.2), and ALAT entries a store kills (alat: the ALAT
+compares address bits 11:3 only).
 """
 
 from emit import Bundle as B, pair
@@ -130,6 +135,128 @@ STORES["stld_line"] = ([one("m", "st8 [r33] = r34"),
 STORES["st4ld8"] = ([one("m", "st4 [r33] = r34"),
                      one("m", "ld8 r34 = [r33]")], [])
 
+# Sub-word stores and loads: a store of SW bytes at r33+SOFF, k-1 empty
+# groups, and a load of LW bytes at r33+LOFF feeding the next store's data.
+# bzip2's move-to-front shift as clang and gcc schedule it: load byte k and
+# store the byte loaded before over it, walking a 2^BITS-byte window.  r27
+# is the pointer, r25 the byte to store.
+MTF_SETUP = ["mov r27 = r33", "mov r25 = 0"]
+for bits in (8, 12):
+    STORES[f"mtf_clang_{bits}"] = ([
+        B("mmi", "ld1 r28 = [r27]", "st1 [r27] = r25", "adds r29 = 1, r27 ;;"),
+        B("mii", "nop.m 0", "mov r25 = r28",
+          f"dep r27 = r29, r33, 0, {bits} ;;")], MTF_SETUP)
+    STORES[f"mtf_gcc_{bits}"] = ([
+        B("mii", "ld1 r28 = [r27]", "mov r26 = r27", "adds r29 = 1, r27 ;;"),
+        B("mii", "nop.m 0", "mov r24 = r25",
+          f"dep r27 = r29, r33, 0, {bits}"),
+        B("mmi", "nop.m 0", "nop.m 0", "mov r25 = r28 ;;"),
+        B("mmi", "st1 [r26] = r24", "nop.m 0", "nop.i 0 ;;")], MTF_SETUP)
+# Variants of the clang shape: the pointer stepping STRIDE bytes, GAPS empty
+# groups after, and the store SOFF bytes from the load.
+for stride, gaps, soff in ((4, 0, 0), (8, 0, 0), (64, 0, 0), (1, 1, 0),
+                           (1, 2, 0), (8, 1, 0), (1, 0, 128), (1, 0, 8),
+                           (8, 0, 128), (0, 0, 0)):
+    STORES[f"mtfv_s{stride}_g{gaps}_o{soff}"] = ([
+        B("mmi", "ld1 r28 = [r27]", "st1 [r26] = r25",
+          f"adds r29 = {stride}, r27 ;;"),
+        B("mii", "nop.m 0", "mov r25 = r28", "dep r27 = r29, r33, 0, 12 ;;"),
+        B("mmi", "nop.m 0", "nop.m 0", f"adds r26 = {soff}, r27 ;;")]
+        + [GAP] * gaps, MTF_SETUP + [f"adds r26 = {soff}, r33"])
+# One load and one store in an issue group, a fixed address apart: which
+# pairs cost what (mtfv: about 10 cycles when they are the same byte).
+# NAME: (first, second, setup); r27 = r33, r26 = r33 + SOFF.
+PAIRS = {
+    "ld1st1": ("ld1 r28 = [r27]", "st1 [r26] = r25"),
+    "st1ld1": ("st1 [r26] = r25", "ld1 r28 = [r27]"),
+    "ld8st8": ("ld8 r28 = [r27]", "st8 [r26] = r25"),
+    "ld8st1": ("ld8 r28 = [r27]", "st1 [r26] = r25"),
+    "ld1st8": ("ld1 r28 = [r27]", "st8 [r26] = r25"),
+    "ld4st4": ("ld4 r28 = [r27]", "st4 [r26] = r25"),
+}
+for name, (a, b) in PAIRS.items():
+    for soff in ((0, 1, 4, 8, 64, 4096) if name == "ld1st1" else (0, 8)):
+        for use in (True, False):
+            STORES[f"pair_{name}_o{soff}" + ("" if use else "_nouse")] = ([
+                B("mmi", a, b, "nop.i 0 ;;"),
+                B("mii", "nop.m 0", "mov r25 = r28" if use else "nop.i 0",
+                  "nop.i 0 ;;")],
+                ["mov r27 = r33", f"movl r18 = {soff}", "add r26 = r33, r18",
+                 "mov r25 = 0"])
+# ld8 then st8 in a group, the store SOFF bytes on: which address bits
+# decide the cost.
+for soff in (16, 24, 32, 40, 48, 56, 72, 128, 192, 256, 512, 1024, 2048,
+             4160, 8192, 16384, 65536, 1 << 20):
+    STORES[f"pair_ld8st8_o{soff}"] = ([
+        B("mmi", "ld8 r28 = [r27]", "st8 [r26] = r25", "nop.i 0 ;;"),
+        B("mii", "nop.m 0", "mov r25 = r28", "nop.i 0 ;;")],
+        ["mov r27 = r33", f"movl r18 = {soff}", "add r26 = r33, r18",
+         "mov r25 = 0"])
+STORES["pair_ld8_only"] = ([B("mmi", "ld8 r28 = [r27]", "nop.m 0",
+                              "nop.i 0 ;;"),
+                            B("mii", "nop.m 0", "mov r25 = r28",
+                              "nop.i 0 ;;")], ["mov r27 = r33"])
+STORES["pair_st8_only"] = ([B("mmi", "nop.m 0", "st8 [r26] = r25",
+                              "nop.i 0 ;;"),
+                            B("mii", "nop.m 0", "nop.i 0", "nop.i 0 ;;")],
+                           ["mov r26 = r33", "mov r25 = 0"])
+# The same shapes with the line first brought into L1D (a load and a use),
+# or flushed from every cache (fc): does the cost depend on where the line
+# starts?
+WARM = ["ld8 r30 = [r33] ;;", "add r30 = r30, r0 ;;"]
+COLD = ["fc r33 ;;", "sync.i ;;", "srlz.d ;;"]
+for state, pre in (("warm", WARM), ("cold", COLD)):
+    STORES[f"bi_pair_ld8st8_o0_{state}"] = ([
+        B("mmi", "ld8 r28 = [r27]", "st8 [r26] = r25", "nop.i 0 ;;"),
+        B("mii", "nop.m 0", "mov r25 = r28", "nop.i 0 ;;")],
+        ["mov r27 = r33", "mov r26 = r33", "mov r25 = 0"] + pre)
+    STORES[f"bi_pair_ld8st8_o16_{state}"] = ([
+        B("mmi", "ld8 r28 = [r27]", "st8 [r26] = r25", "nop.i 0 ;;"),
+        B("mii", "nop.m 0", "mov r25 = r28", "nop.i 0 ;;")],
+        ["mov r27 = r33", "adds r26 = 16, r33", "mov r25 = 0"] + pre)
+    STORES[f"bi_stld_next_{state}"] = ([
+        one("m", "st8 [r33] = r34"), one("m", "ld8 r34 = [r36]")],
+        ["adds r36 = 8, r33"] + pre)
+    STORES[f"bi_st1ld1_0_8_{state}"] = ([
+        one("m", "st1 [r33] = r34"), one("m", "ld1 r34 = [r36]")],
+        ["adds r36 = 8, r33"] + pre)
+    STORES[f"bi_st1ld1_0_64_{state}"] = ([
+        one("m", "st1 [r33] = r34"), one("m", "ld1 r34 = [r36]")],
+        ["adds r36 = 64, r33"] + pre)
+    STORES[f"bi_st8ld8_0_64_{state}"] = ([
+        one("m", "st8 [r33] = r34"), one("m", "ld8 r34 = [r36]")],
+        ["adds r36 = 64, r33"] + pre)
+# A store then, K-1 groups on, a load of the next word of the line, with
+# the line cold (flushed) or warm: how far apart they must be for the load's
+# fill to survive the next store.
+for k in (1, 2, 3, 4, 6, 8, 12):
+    for state, pre in (("warm", WARM), ("cold", COLD)):
+        STORES[f"bi_stld8_k{k}_{state}"] = (
+            [one("m", "st8 [r33] = r34")] + [GAP] * (k - 1)
+            + [one("m", "ld8 r34 = [r36]")], ["adds r36 = 8, r33"] + pre)
+# A load, K-1 groups, then a store to the next word: the order the manual
+# describes (6.6.3.2), without a use of the load in between.
+for k in (1, 2, 4, 6, 8):
+    STORES[f"bi_ldst8_k{k}_cold"] = (
+        [one("m", "ld8 r34 = [r36]")] + [GAP] * (k - 1)
+        + [one("m", "st8 [r33] = r40")], ["adds r36 = 8, r33", "mov r40 = 0"]
+        + COLD)
+
+# Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
+# ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
+# uses ordinary loads.
+for soff in (0, 8, 72, 128, 4096, 4100, 4104, 8192, 16384, 32768, 65536,
+             1 << 17, 1 << 18, 1 << 19, 1 << 20, 1 << 21, 1 << 24):
+    for kind, la, lc in (("alat", "ld8.a", "ld8.c.clr"), ("plain", "ld8", "ld8")):
+        STORES[f"alat_{kind}_o{soff}"] = ([
+            one("m", f"{la} r34 = [r33]"), one("m", "st8 [r36] = r34"),
+            one("m", f"{lc} r34 = [r33]")],
+            [f"movl r18 = {soff}", "add r36 = r33, r18"] + WARM)
+# Without the store at all.
+STORES["alat_nostore"] = ([one("m", "ld8.a r34 = [r33]"), GAP,
+                           one("m", "ld8.c.clr r34 = [r33]")], WARM)
+STORES["alat_nostore_nc"] = ([one("m", "ld8.a r34 = [r33]"), GAP,
+                              one("m", "ld8.c.nc r34 = [r33]")], WARM)
 
 def kernels():
     ks = []
