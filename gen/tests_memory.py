@@ -336,6 +336,70 @@ BLOCKS["brev_block_copy"] = (BREV_COPY + brev_element() * 8 + BREV_RESET,
                              BREV_SETUP + [f"adds r{96 + i} = {64 + 8 * i}, r34"
                                            for i in range(8)])
 
+
+# clang's 32-byte wildcopy loop from zstd's ZSTD_decompressSequences, its
+# bundles as compiled, branches made nops: two 16-byte halves of ld1/st1,
+# dst1 r50, src2 r51 (src1 is r51 - 16), dst2 r52, each advancing 32.
+ZCOPY32 = [
+    B('mmf', 'adds r53 = -16, r51', 'mov r8 = r50', 'nop.f 0'),
+    B('mii', 'adds r3 = 11, r50', 'adds r9 = 14, r50', 'adds r10 = 13, r50 ;;'),
+    B('mii', 'sub r18 = r50, r53', 'adds r19 = 7, r53', 'adds r23 = 8, r53'),
+    B('mii', 'adds r24 = 9, r53', 'adds r20 = 6, r53', 'adds r25 = 10, r53'),
+    B('mmi', 'adds r26 = 11, r53 ;;', 'adds r30 = 15, r18', 'adds r27 = 12, r53'),
+    B('mfi', 'adds r21 = 5, r53', 'nop.f 0', 'adds r28 = 13, r53'),
+    B('mii', 'adds r29 = 14, r53', 'adds r22 = 4, r53', 'adds r18 = 1, r53 ;;'),
+    B('mib', 'cmp.ltu p7, p6 = 30, r30', 'nop.i 0', 'nop.b 0'),
+    B('mmi', 'mov r30 = r53', 'ld1 r26 = [r26]', 'adds r11 = 12, r50 ;;'),
+    B('mmi', 'ld1 r31 = [r30], 15', 'ld1 r29 = [r29]', 'nop.i 0'),
+    B('mii', 'st1 [r3] = r26', 'adds r3 = 3, r53', 'adds r53 = 2, r53 ;;'),
+    B('mmi', 'st1 [r8] = r31, 15', 'ld1 r30 = [r30]', 'adds r26 = 10, r50'),
+    B('mmi', 'ld1 r28 = [r28]', 'st1 [r9] = r29', 'adds r29 = 4, r50 ;;'),
+    B('mmi', 'adds r9 = 7, r50', 'st1 [r8] = r30', 'adds r8 = 9, r50'),
+    B('mmi', 'ld1 r25 = [r25]', 'ld1 r24 = [r24]', 'adds r30 = 8, r50'),
+    B('mmi', 'ld1 r27 = [r27]', 'st1 [r10] = r28', 'adds r10 = 6, r50 ;;'),
+    B('mmi', 'st1 [r11] = r27', 'ld1 r23 = [r23]', 'nop.i 0'),
+    B('mmi', 'st1 [r26] = r25', 'ld1 r19 = [r19]', 'adds r25 = 5, r50 ;;'),
+    B('mmi', 'st1 [r8] = r24', 'st1 [r30] = r23', 'adds r30 = 3, r50'),
+    B('mmi', 'ld1 r20 = [r20]', 'ld1 r24 = [r21]', 'adds r21 = 2, r50'),
+    B('mmf', 'ld1 r11 = [r22]', 'ld1 r22 = [r3]', 'nop.f 0'),
+    B('mmi', 'adds r3 = 1, r50', 'st1 [r9] = r19', 'nop.i 0 ;;'),
+    B('mmi', 'st1 [r10] = r20', 'ld1 r53 = [r53]', 'nop.i 0'),
+    B('mmi', 'ld1 r18 = [r18]', 'st1 [r25] = r24', 'nop.i 0'),
+    B('mmi', 'st1 [r29] = r11', 'st1 [r30] = r22', 'nop.i 0 ;;'),
+    B('mmi', 'st1 [r21] = r53', 'st1 [r3] = r18', 'nop.i 0'),
+    B('mii', 'sub r53 = r52, r51', 'adds r22 = 8, r51', 'adds r23 = 9, r51'),
+    B('mii', 'adds r19 = 6, r51', 'adds r24 = 10, r51', 'adds r25 = 11, r51 ;;'),
+    B('mmi', 'adds r18 = 7, r51', 'adds r29 = 15, r53', 'adds r26 = 12, r51'),
+    B('mmi', 'adds r20 = 5, r51', 'adds r27 = 13, r51', 'adds r28 = 14, r51'),
+    B('mmi', 'adds r21 = 4, r51', 'adds r53 = 1, r51', 'mov r31 = r52'),
+    B('mmi', 'adds r8 = 14, r52', 'adds r11 = 11, r52', 'adds r9 = 13, r52 ;;'),
+    B('mib', 'cmp.ltu p7, p6 = 30, r29', 'nop.i 0', 'nop.b 0'),
+    B('mmi', 'mov r29 = r51', 'ld1 r28 = [r28]', 'adds r10 = 12, r52'),
+    B('mii', 'adds r3 = 10, r52', 'adds r50 = 32, r50 ;;', 'nop.i 0'),
+    B('mmi', 'ld1 r30 = [r29], 15', 'ld1 r25 = [r25]', 'nop.i 0'),
+    B('mii', 'st1 [r8] = r28', 'adds r28 = 3, r51', 'adds r8 = 6, r52 ;;'),
+    B('mmi', 'st1 [r31] = r30, 15', 'ld1 r29 = [r29]', 'adds r30 = 9, r52'),
+    B('mii', 'st1 [r11] = r25', 'adds r25 = 8, r52', 'adds r11 = 2, r51'),
+    B('mmi', 'ld1 r27 = [r27]', 'ld1 r26 = [r26]', 'nop.i 0 ;;'),
+    B('mii', 'st1 [r31] = r29', 'adds r29 = 7, r52', 'adds r51 = 32, r51'),
+    B('mmi', 'ld1 r24 = [r24]', 'ld1 r23 = [r23]', 'nop.i 0'),
+    B('mmi', 'st1 [r9] = r27', 'st1 [r10] = r26', 'adds r10 = 4, r52'),
+    B('mmi', 'ld1 r22 = [r22] ;;', 'st1 [r3] = r24', 'adds r24 = 5, r52'),
+    B('mmi', 'st1 [r30] = r23', 'ld1 r18 = [r18]', 'adds r23 = 1, r52'),
+    B('mmi', 'st1 [r25] = r22', 'ld1 r19 = [r19]', 'nop.i 0'),
+    B('mii', 'ld1 r31 = [r20]', 'adds r20 = 3, r52', 'adds r22 = 2, r52'),
+    B('mmi', 'adds r52 = 32, r52', 'ld1 r27 = [r21]', 'nop.i 0'),
+    B('mmi', 'ld1 r21 = [r28] ;;', 'st1 [r29] = r18', 'nop.i 0'),
+    B('mmi', 'st1 [r8] = r19', 'ld1 r28 = [r11]', 'nop.i 0'),
+    B('mmi', 'ld1 r53 = [r53]', 'st1 [r24] = r31', 'nop.i 0'),
+    B('mmi', 'st1 [r10] = r27', 'st1 [r20] = r21', 'nop.i 0 ;;'),
+    B('mmb', 'st1 [r22] = r28', 'st1 [r23] = r53', 'nop.b 0')]
+for off in (16, 32, 64, 4096, 524288):
+    BLOCKS[f"zcopy32_o{off}"] = (ZCOPY32, [
+        "adds r51 = 16, r34", f"movl r19 = {off}", "add r50 = r34, r19",
+        "add r52 = r34, r19 ;;", "adds r52 = 16, r52"])
+
+
 # Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
 # ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
 # uses ordinary loads.
