@@ -248,6 +248,16 @@ for k in (1, 2, 4, 6, 8):
         + [one("m", "st8 [r33] = r40")], ["adds r36 = 8, r33", "mov r40 = 0"]
         + COLD)
 
+# bi_ldst8_k1_cold without the fc: a load, then a store a group later to the
+# word above or below it, in r33's line or L lines on.  Does the store's
+# direction or the line's L1D set decide whether the line stays cold?
+for line in (0, 1, 2, 3, 8):
+    for name, ld, sto in (("up", 0, 8), ("down", 8, 0)):
+        STORES[f"ldst_order_l{line}_{name}"] = (
+            [one("m", "ld8 r45 = [r36]"), one("m", "st8 [r37] = r40")],
+            [f"adds r36 = {64 * line + ld}, r33",
+             f"adds r37 = {64 * line + sto}, r33"])
+
 # Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
 # ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
 # uses ordinary loads.
@@ -610,6 +620,16 @@ def kernels():
                    teardown=RING_TEARDOWN)
     for name, (body, setup) in STORES.items():
         ks += pair(f"st_{name}", "memory", body, SSETUP + setup)
+    # The ld8/st8 pair of one address, and mtfv's walk, as the store setup
+    # leaves them, with 8 empty groups after its st8 [r33], and without
+    # it: does that store, a cycle or two before the first load of r33,
+    # decide whether the line starts in L1D?
+    for name in ("pair_ld8st8_o0", "mtfv_s4_g0_o0"):
+        body, setup = STORES[name]
+        ks += pair(f"st_start_{name}_gap", "memory", body,
+                   SSETUP + ["nop.i 0 ;;"] * 8 + setup)
+        ks += pair(f"st_start_{name}_nost", "memory", body,
+                   [l for l in SSETUP if not l.startswith("st8")] + setup)
     for name, body in ZBYTE.items():
         ks += pair(f"st_{name}", "memory", body,
                    SSETUP + ["adds r36 = 72, r33", "adds r39 = 256, r33"] +
