@@ -443,6 +443,55 @@ for n in (1, 4, 8, 16, 32, 64):
             "mov r60 = r34", "movl r19 = 0x100000",
             "add r61 = r34, r19"])
 
+# MiBench aes's CBC step in decfile, clang's bundles as built, branches made
+# nops: xor the 16 bytes decrypt wrote at r43 into the chaining block at
+# r37 + 0..15 (r37, r38, r35, r47-r58, r60 hold its byte addresses), a
+# byte at a time.  "dx" first stores r43's 16 bytes in decrypt's order.
+CBCX = [
+    B('mmi', 'adds r23 = 4, r43', 'adds r24 = 5, r43', 'adds r27 = 6, r43'),
+    B('mmi', 'adds r28 = 7, r43', 'adds r10 = 9, r43', 'mov r70 = r43 ;;'),
+    B('mmi', 'ld1 r23 = [r23]', 'ld1 r25 = [r48]', 'adds r20 = 3, r43'),
+    B('mmi', 'ld1 r24 = [r24]', 'ld1 r26 = [r49]', 'adds r8 = 8, r43'),
+    B('mmi', 'adds r72 = 1, r43', 'adds r19 = 2, r43', 'adds r73 = 11, r43 ;;'),
+    B('mmi', 'xor r18 = r25, r23', 'adds r23 = 10, r43', 'mov r64 = r43'),
+    B('mmi', 'ld1 r27 = [r27]', 'ld1 r29 = [r50]', 'xor r21 = r26, r24 ;;'),
+    B('mmi', 'st1 [r48] = r18', 'ld1 r30 = [r28]', 'adds r24 = 13, r43'),
+    B('mmi', 'ld1 r31 = [r51]', 'st1 [r49] = r21', 'mov r65 = r42'),
+    B('mmi', 'ld1 r3 = [r10]', 'ld1 r18 = [r53]', 'xor r11 = r29, r27'),
+    B('mmi', 'mov r66 = r40', 'mov r67 = r74', 'mov r75 = r46 ;;'),
+    B('mmi', 'xor r26 = r31, r30', 'adds r31 = 12, r43', 'adds r30 = 14, r43'),
+    B('mmi', 'ld1 r71 = [r70], 15', 'ld1 r20 = [r20]', 'xor r29 = r18, r3 ;;'),
+    B('mmi', 'st1 [r51] = r26', 'ld1 r22 = [r47]', 'nop.i 0'),
+    B('mmi', 'ld1 r10 = [r37]', 'st1 [r50] = r11', 'nop.i 0'),
+    B('mmi', 'st1 [r53] = r29', 'ld1 r9 = [r8]', 'nop.i 0'),
+    B('mmi', 'ld1 r21 = [r52] ;;', 'xor r20 = r22, r20', 'xor r71 = r10, r71'),
+    B('mmi', 'ld1 r72 = [r72]', 'ld1 r3 = [r38]', 'xor r26 = r21, r9 ;;'),
+    B('mmi', 'st1 [r47] = r20', 'ld1 r19 = [r19]', 'nop.i 0'),
+    B('mii', 'ld1 r22 = [r35]', 'xor r72 = r3, r72', 'nop.i 0'),
+    B('mmi', 'st1 [r37] = r71', 'st1 [r52] = r26', 'nop.i 0'),
+    B('mmi', 'ld1 r27 = [r73]', 'ld1 r8 = [r31]', 'nop.i 0 ;;'),
+    B('mmi', 'st1 [r38] = r72', 'ld1 r31 = [r23]', 'xor r19 = r22, r19'),
+    B('mmi', 'ld1 r73 = [r54] ;;', 'st1 [r35] = r19', 'nop.i 0'),
+    B('mmi', 'ld1 r20 = [r55]', 'ld1 r18 = [r56]', 'xor r23 = r73, r31'),
+    B('mmi', 'ld1 r71 = [r24]', 'ld1 r21 = [r57]', 'nop.i 0 ;;'),
+    B('mmi', 'xor r73 = r18, r8', 'st1 [r54] = r23', 'xor r72 = r20, r27'),
+    B('mmi', 'ld1 r28 = [r30]', 'ld1 r19 = [r58]', 'xor r18 = r21, r71 ;;'),
+    B('mmi', 'st1 [r55] = r72', 'st1 [r56] = r73', 'nop.i 0'),
+    B('mmi', 'ld1 r70 = [r70]', 'ld1 r71 = [r60]', 'xor r72 = r19, r28 ;;'),
+    B('mmi', 'st1 [r57] = r18', 'st1 [r58] = r72', 'xor r70 = r71, r70 ;;'),
+    B('mib', 'st1 [r60] = r70', 'nop.i 0', 'nop.b 0')]
+CBC_A = {0: 37, 1: 38, 2: 35, 3: 47, 4: 48, 5: 49, 6: 50, 7: 51, 8: 52,
+         9: 53, 10: 54, 11: 55, 12: 56, 13: 57, 14: 58, 15: 60}
+CBC_SETUP = ["adds r43 = 1024, r33", "adds r37 = 1280, r33"] + [
+    f"adds r{r} = {k}, r37" for k, r in CBC_A.items() if k]
+DECRYPT_ORDER = [1, 5, 7, 9, 6, 8, 3, 0, 2, 12, 13, 4, 10, 11, 14, 15]
+BLOCKS["cbc_x"] = (CBCX, CBC_SETUP)
+BLOCKS["cbc_dx"] = ([B("mii", None, f"adds r{100 + i} = {k}, r43",
+                       "nop.i 0 ;;" if i % 4 == 3 else "nop.i 0")
+                     for i, k in enumerate(DECRYPT_ORDER)] +
+                    [one("m", f"st1 [r{100 + i}] = r40") for i in range(16)] +
+                    CBCX, CBC_SETUP)
+
 # Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
 # ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
 # uses ordinary loads.
