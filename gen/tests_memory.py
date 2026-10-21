@@ -18,7 +18,11 @@ st_*: stores, and loads and stores together: store throughput (same, seq,
 gap, alt), store-to-load forwarding (stld, 251110-003 Table 6-5), loads
 and stores in one group (mtf, pair), the L1D fill a store cancels (bi,
 251110-003 6.6.3.2), and ALAT entries a store kills (alat: the ALAT
-compares address bits 11:3 only).
+compares address bits 11:3 only).  Then 1- and 2-byte stores to one word,
+which leave the store queue 5 cycles apart (seqst, st1st8, st8st1), and how
+many queue before the pipeline waits (strun, stq, stqw: about 18); glibc's
+byte copy loop (copy1, copyrun), and a load in a store's group with the
+same address bits 11:2 (alias).
 """
 
 from emit import Bundle as B, pair
@@ -252,6 +256,89 @@ for soff in (0, 8, 72, 128, 4096, 4100, 4104, 8192, 16384, 32768, 65536,
             one("m", f"{la} r34 = [r33]"), one("m", "st8 [r36] = r34"),
             one("m", f"{lc} r34 = [r33]")],
             [f"movl r18 = {soff}", "add r36 = r33, r18"] + WARM)
+# One store a cycle to consecutive addresses, SIZE bytes each and STRIDE
+# apart, or one every GAP+1 cycles: does a store wait for one to the same
+# word a cycle earlier when they write different bytes of it?
+for size in (1, 2, 4, 8):
+    for stride in sorted({size, 8}):
+        for gap in (0, 1):
+            STORES[f"seqst{size}_s{stride}_g{gap}"] = (
+                [one("m", f"st{size} [r34] = r40, {stride}")] + [GAP] * gap,
+                [])
+# How long a sub-word store keeps a later one to its word waiting, and
+# stores that write the same bytes again (stride 0).
+for size, stride in ((1, 1), (1, 0), (2, 0), (4, 0), (8, 0)):
+    for gap in (2, 3, 4, 5, 6):
+        if stride == 0 and gap > 2:
+            continue
+        STORES[f"seqst{size}_s{stride}_g{gap}"] = (
+            [one("m", f"st{size} [r34] = r40, {stride}")] + [GAP] * gap, [])
+for size in (1, 2, 4):
+    STORES[f"seqst{size}_s0_g0"] = (
+        [one("m", f"st{size} [r34] = r40")], [])
+# A byte store and then a doubleword store to its word, and the reverse.
+STORES["st1st8"] = ([one("m", "st1 [r34] = r40"), one("m", "st8 [r34] = r40, 8")], [])
+STORES["st8st1"] = ([one("m", "st8 [r34] = r40"), one("m", "st1 [r34] = r40, 8")], [])
+# glibc's byte copy loop: each group stores the byte the previous one
+# loaded and loads the next.
+STORES["copy1"] = ([B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+                      "nop.i 0 ;;")],
+                   ["movl r18 = 0x80000", "add r27 = r33, r18"])
+# Which half of the copy costs: the byte loads alone, the loads with
+# doubleword stores, the copy from a source 64 bytes behind the
+# destination (zstd's overlapping match copy), and the loads not feeding the
+# stores.
+STORES["copy1_ldonly"] = ([one("m", "ld1 r40 = [r27], 1")],
+                          ["movl r18 = 0x80000", "add r27 = r33, r18"])
+STORES["copy1_st8"] = ([B("mmi", "st8 [r34] = r40, 8", "ld1 r40 = [r27], 1",
+                          "nop.i 0 ;;")],
+                       ["movl r18 = 0x80000", "add r27 = r33, r18"])
+STORES["copy1_behind64"] = ([B("mmi", "st1 [r34] = r40, 1",
+                               "ld1 r40 = [r27], 1", "nop.i 0 ;;")],
+                            ["adds r27 = -64, r34"])
+STORES["copy1_nodep"] = ([B("mmi", "st1 [r34] = r41, 1",
+                            "ld1 r40 = [r27], 1", "nop.i 0 ;;")],
+                         ["movl r18 = 0x80000", "add r27 = r33, r18",
+                          "mov r41 = 0"])
+# The far copy with the source the given distance from the destination: is
+# the cost an L2 bank conflict (the same address bits 7:4)?
+for off in (8, 16, 32, 64, 128, 256, 4096, 0x80000 + 16, 0x80000 + 64,
+            0x80000 + 128):
+    STORES[f"copy1_d{off}"] = ([B("mmi", "st1 [r34] = r40, 1",
+                                  "ld1 r40 = [r27], 1", "nop.i 0 ;;")],
+                               [f"movl r18 = {off}", "add r27 = r34, r18"])
+# A store and a load 4 KB on (the same address bits 11:0), in one group or
+# the load a group later, both pointers stepping SIZE: the false conflict.
+for size in (1, 8):
+    for gap in (0, 1, 2):
+        STORES[f"alias{size}_g{gap}"] = (
+            [B("mmi", f"st{size} [r34] = r41, {size}",
+               None if gap else f"ld{size} r40 = [r27], {size}",
+               "nop.i 0 ;;")] + [GAP] * (gap - 1 if gap else 0)
+            + ([one("m", f"ld{size} r40 = [r27], {size}")] if gap else []),
+            ["movl r18 = 4096", "add r27 = r34, r18", "mov r41 = 0"])
+        STORES[f"alias{size}_g{gap}_d4160"] = (
+            STORES[f"alias{size}_g{gap}"][0],
+            ["movl r18 = 4160", "add r27 = r34, r18", "mov r41 = 0"])
+# Short copies, as zstd makes them (about 16 bytes a call): RUN copy groups,
+# then GAPS empty groups standing for the call around them.  Do the first
+# stores of a run go at one a cycle?
+for run in (2, 4, 8, 16, 32):
+    for gaps in (4, 16):
+        STORES[f"copyrun{run}_g{gaps}"] = (
+            [B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+               "nop.i 0 ;;")] * run + [GAP] * gaps,
+            ["movl r18 = 0x80000", "add r27 = r33, r18"])
+        STORES[f"strun{run}_g{gaps}"] = (
+            [one("m", "st1 [r34] = r40, 1")] * run + [GAP] * gaps, [])
+# How many conflicting sub-word stores the pipeline queues before it
+# stalls: RUN st1s to the bytes of one word, then 48 groups the queue can
+# drain under, the first of them stepping to the next word.
+for run in range(2, 9):
+    STORES[f"stq{run}"] = (
+        [one("m", "st1 [r34] = r40, 1")] * run
+        + [B("mmi", None, None, f"adds r34 = {8 - run}, r34 ;;")]
+        + [GAP] * 47, [])
 # Without the store at all.
 STORES["alat_nostore"] = ([one("m", "ld8.a r34 = [r33]"), GAP,
                            one("m", "ld8.c.clr r34 = [r33]")], WARM)
@@ -283,4 +370,10 @@ def kernels():
                    teardown=RING_TEARDOWN)
     for name, (body, setup) in STORES.items():
         ks += pair(f"st_{name}", "memory", body, SSETUP + setup)
+    # Deeper than stq: RUN st1s over RUN/8 words, then enough groups to drain.
+    for run in (8, 12, 16, 20, 24, 32):
+        ks += pair(f"st_stqw{run}", "memory",
+                   [one("m", "st1 [r34] = r40, 1")] * run
+                   + [B("mmi", None, None, f"adds r34 = {-run % 8}, r34 ;;")]
+                   + [GAP] * (127 - run), SSETUP, bodies=4)
     return ks
