@@ -422,6 +422,27 @@ for n in (16, 31, 32, 33, 34, 48, 64):
     for step in (16384, 65536):
         BLOCKS[f"dtlb_chain_s{step // 1024}k_p{n}"] = dtlb_chain(n, step)
 
+# glibc's memcpy tail, its byte loop as built (st1 and the next ld1 in one
+# group, br.cloop) for N bytes from r60 to r61, the harness's ar.lc kept in
+# r62.  "stream" moves both on by N each body; "warm" copies the same bytes.
+def mcpy(n, step):
+    return [B("mii", None, "mov r62 = ar.lc", f"adds r22 = {n - 1}, r0 ;;"),
+            B("mii", "ld1 r23 = [r60], 1", "mov.i ar.lc = r22",
+              "cmp.eq p0, p6 = 0, r22 ;;"),
+            B("mmi", "st1 [r61] = r23, 1", "(p6) ld1 r23 = [r60], 1",
+              "nop.i 0", label="1"),
+            B("mib", "cmp.lt p6, p0 = 1, r22", "adds r22 = -1, r22",
+              "br.cloop.dptk.few 1b ;;"),
+            B("mii", f"adds r60 = {step - n}, r60",
+              f"adds r61 = {step - n}, r61", "mov.i ar.lc = r62 ;;")]
+
+
+for n in (1, 4, 8, 16, 32, 64):
+    for kind, step in (("stream", n), ("warm", 0)):
+        BLOCKS[f"mcpy_n{n}_{kind}"] = (mcpy(n, step), [
+            "mov r60 = r34", "movl r19 = 0x100000",
+            "add r61 = r34, r19"])
+
 # Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
 # ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
 # uses ordinary loads.
