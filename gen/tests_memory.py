@@ -400,6 +400,28 @@ for off in (16, 32, 64, 4096, 524288):
         "add r52 = r34, r19 ;;", "adds r52 = 16, r52"])
 
 
+# The L1 DTLB: a chain of loads, each address waiting on the load before,
+# over N lines STEP bytes apart, each in its own L1D set.  With more pages
+# than the L1 DTLB's 32 entries, each load misses it and so L1D.
+def dtlb_chain(n, step=4096):
+    body = []
+    for k in range(n):
+        nxt = 60 + (k + 1) % n
+        body += [B("mmi", f"ld8 r45 = [r{60 + k}]", None, "nop.i 0 ;;"),
+                 B("mii", None, f"add r{nxt} = r{nxt}, r45", "nop.i 0 ;;")]
+    setup = []
+    for k in range(n):
+        setup += [f"movl r19 = {k * step + (k % 64) * 64}",
+                  f"add r{60 + k} = r34, r19 ;;"]
+    return body, setup
+
+
+for n in (8, 16, 24, 28, 30, 31, 32, 33, 34, 36, 40, 48, 64):
+    BLOCKS[f"dtlb_chain_p{n}"] = dtlb_chain(n)
+for n in (16, 31, 32, 33, 34, 48, 64):
+    for step in (16384, 65536):
+        BLOCKS[f"dtlb_chain_s{step // 1024}k_p{n}"] = dtlb_chain(n, step)
+
 # Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
 # ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
 # uses ordinary loads.
