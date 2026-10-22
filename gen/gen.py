@@ -32,6 +32,7 @@ MODULES = [
     "tests_cbranch",
     "tests_ctop",
     "tests_spk",
+    "tests_gemmk",
     "tests_dval",
     "tests_lalign",
 ]
