@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Indirect branches: an interpreter's dispatch.
+
+Each body loads the next entry of a table of P targets, makes it an
+address with mov ip, moves it to b6, waits `dist` groups, and branches
+through b6 to one of K target blocks, each of which branches to the
+body's end.  The table cycles; its entries are a pseudo-random sequence
+of the K targets ("rnd"), or each target in turn ("seq").  Without a
+penalty a body takes 11 + dist groups.
+
+On a 9340 a body costs 6 cycles more whenever dist (in bundles) is 9 or
+less, and nothing from 10 on, whatever K, the order or the hint; the w*
+bodies, with two-bundle groups, show that bundles count, not cycles.
+"""
+
+from __future__ import annotations
+
+import random
+
+from emit import Bundle as B, pair
+
+TABLE = 0xE0000
+P = 16
+NOP = B("mii", None, None, "nop.i 0 ;;")
+
+
+NOP2 = [B("mii", None, None, "nop.i 0"), B("mii", None, None, "nop.i 0 ;;")]
+
+
+def body(k, dist, hint, direct=False, wide=False):
+    pre = [B("mmi", "ld8 r20 = [r21]", None, "adds r22 = 8, r22 ;;"),
+           B("mmi", None, None, "and r22 = r19, r22 ;;"),
+           B("mmi", None, None, "add r21 = r18, r22 ;;"),
+           B("mii", None, "mov r23 = ip", "nop.i 0 ;;"),
+           B("mmi", None, None, "add r20 = r20, r23 ;;"),
+           B("mii", None, "mov b6 = r20", "nop.i 0 ;;")]
+    pre += (NOP2 if wide else [NOP]) * dist
+    pre.append(B("mib", None, None, "br.sptk.few 20001f ;;" if direct
+                 else f"br.{hint}.few b6 ;;"))
+    ip_at = 3
+    t0 = len(pre)
+    tgt = []
+    for i in range(k):
+        tgt += [B("mii", None, None, "nop.i 0 ;;",
+                  label="20001" if i == 0 else None)] + [NOP] * 2 + [B("mib", None, None, "br.sptk.few 20000f ;;")]
+    end = [B("mii", None, None, "nop.i 0 ;;", label="20000")]
+    return pre + tgt + end, (t0 - ip_at) * 16
+
+
+def table(k, order, base):
+    if order == "seq":
+        seq = [i % k for i in range(P)]
+    else:
+        rng = random.Random(k)
+        seq = [rng.randrange(k) for _ in range(P)]
+    return [base + 64 * t for t in seq]
+
+
+def setup(offs):
+    out = [f"movl r18 = {TABLE:#x}", "add r18 = r33, r18", "mov r22 = r0",
+           f"mov r19 = {8 * P - 8}", "mov r25 = r18"]
+    for o in offs:
+        out += [f"movl r24 = {o}", "st8 [r25] = r24, 8"]
+    out.append("mov r21 = r18")
+    return out
+
+
+def kernels():
+    ks = []
+    for k, order in ((1, "seq"), (2, "seq"), (2, "rnd"), (4, "seq"),
+                     (4, "rnd"), (8, "rnd")):
+        for dist in (0, 3, 8):
+            for hint in ("sptk", "dptk"):
+                b, base = body(k, dist, hint)
+                ks += pair(f"ib_k{k}_{order}_d{dist}_{hint}", "branch", b,
+                           setup(table(k, order, base)), bodies=4)
+    # How far ahead of the branch b6 must be written; and the same with an
+    # IP-relative branch to the first target, which costs no bubble.
+    for k, order in ((1, "seq"), (4, "rnd")):
+        for dist in (12, 16, 24, 32):
+            b, base = body(k, dist, "sptk")
+            ks += pair(f"ib_k{k}_{order}_d{dist}_sptk", "branch", b,
+                       setup(table(k, order, base)), bodies=4)
+    for dist in (9, 10, 11, 13, 14):
+        b, base = body(4, dist, "sptk")
+        ks += pair(f"ib_k4_rnd_d{dist}_sptk", "branch", b,
+                   setup(table(4, "rnd", base)), bodies=4)
+    # dist groups of two bundles: is the distance in groups or bundles?
+    for dist in (4, 6, 8, 10, 12):
+        b, base = body(4, dist, "sptk", wide=True)
+        ks += pair(f"ib_k4_rnd_w{dist}_sptk", "branch", b,
+                   setup(table(4, "rnd", base)), bodies=4)
+    for dist in (0, 8):
+        b, base = body(1, dist, "sptk", direct=True)
+        ks += pair(f"ib_direct_d{dist}", "branch", b,
+                   setup(table(1, "seq", base)), bodies=4)
+    return ks
