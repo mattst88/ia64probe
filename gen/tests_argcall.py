@@ -14,6 +14,8 @@ The setup reallocates the harness's frame as 2 inputs, 60 locals and 4
 outputs (r94-r97), so a callee with no alloc of its own has those four.
 """
 
+import re
+
 from emit import Bundle as B, pair
 from tests_memory import KB, MB, name_of, ring_setup, RING_TEARDOWN
 
@@ -75,8 +77,60 @@ def retpar(odd, taken):
     return out + [fill] * (len(out) % 2)
 
 
+# fread's entry: setf.sig of size and count in successive groups,
+# xmpy.l, getf.sig, and a compare that branches on the product.  fm_full
+# is the code as glibc has it, fm_nob without the branch, fm_nomul with
+# the multiply replaced by nops and the compare on count, fm_inl the full
+# sequence without the call around it.
+def fmul(mul=True, br=True, call=True, args=False, pad=0, ind=False):
+    # Inline, the arguments are the harness frame's outputs.
+    a = ({} if call else {"r32": "r94", "r33": "r95", "r34": "r96"})
+    def r(x):
+        return x and re.sub(r"r3[234]\b", lambda g: a.get(g[0], g[0]), x)
+    m = (lambda x: r(x)) if mul else (lambda x: None)
+    seq = [B("mmb", r("alloc r35 = ar.pfs, 3, 1, 0, 0") if call else None,
+             "mov r21 = r12", "nop.b 0", label="2" if call else None),
+           B("mmi", "adds r22 = -16, r12", m("setf.sig f6 = r33"),
+             "mov r23 = b0 ;;"),
+           B("mmi", m("setf.sig f7 = r34"), None, r("adds r24 = 136, r32")),
+           B("mmi", "mov r25 = r1", None, "adds r26 = -1856, r13 ;;"),
+           B("mmf", None, None, "xmpy.l f6 = f6, f7 ;;" if mul
+             else "nop.f 0 ;;"),
+           B("mmi", None, m("getf.sig r20 = f6"), "nop.i 0 ;;"),
+           B("mib", "cmp.eq p6, p7 = 0, r20" if mul
+             else r("cmp.eq p6, p7 = 0, r34"), None,
+             "(p6) br.cond.dpnt.few 3f ;;" if br else "nop.b 0 ;;")]
+    tail = [B("mmi", None, None, "nop.i 0 ;;")] * pad
+    if not call:
+        return seq + [B("mmi", None, None, "nop.i 0 ;;", label="3")] + tail
+    return ([B("mmi", "mov r95 = 1", "mov r96 = 16", "nop.i 0 ;;")] * args +
+            ([B("mlx", None, "movl r27 = 2f ;;"),
+              B("mmi", None, None, "mov b7 = r27 ;;"),
+              B("mib", None, None, "br.call.sptk.many b6 = b7 ;;")] if ind
+             else [B("mib", None, None, "br.call.sptk.many b6 = 2f ;;")]) +
+            [B("mib", None, None, "br.cond.sptk.few 3f ;;")] + seq +
+            [B("mib", None, "mov.i ar.pfs = r35", "br.ret.sptk.many b6 ;;"),
+             B("mmi", None, None, "nop.i 0 ;;", label="3")] + tail)
+
+
 def kernels():
     ks = []
+    fsetup = ["alloc r2 = ar.pfs, 2, 60, 4, 0", "mov r95 = 1",
+              "mov r96 = 16"]
+    for name, kw in (("full", {}), ("nob", {"br": False}),
+                     ("nomul", {"mul": False}), ("inl", {"call": False}),
+                     ("inlnomul", {"call": False, "mul": False}),
+                     ("args", {"args": True}),
+                     ("argsnomul", {"args": True, "mul": False}),
+                     ("ind", {"ind": True, "args": True}),
+                     ("indnomul", {"ind": True, "args": True,
+                                   "mul": False}),
+                     ("pad", {"pad": 64}),
+                     ("padnomul", {"pad": 64, "mul": False}),
+                     ("inlpad", {"call": False, "pad": 64}),
+                     ("inlpadnomul", {"call": False, "pad": 64,
+                                      "mul": False})):
+        ks += pair(f"fm_{name}", "argcall", fmul(**kw), fsetup, bodies=4)
     for f1 in (1, 2):
         for f2 in (1, 2):
             ks += pair(f"tt2_f{f1}{f2}", "argcall", taken2(f1, f2), bodies=4)
