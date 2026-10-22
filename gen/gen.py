@@ -39,6 +39,7 @@ MODULES = [
     "tests_lalign",
     "tests_myrand",
     "tests_argcall",
+    "tests_cellinfo",
 ]
 
 
