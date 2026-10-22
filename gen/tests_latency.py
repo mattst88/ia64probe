@@ -100,6 +100,18 @@ CHAINS = {
                              ("m", "setf.d f32 = r34")], 11),
     "getf_add_setf": (ISETUP, [("m", "setf.sig f32 = r34"),
                                ("m", "getf.sig r34 = f32"), ADD], 12),
+    # setf to an F-unit consumer is 6 and an F-unit producer to getf is 4,
+    # so with getf -> setf 5 each of these is 15.
+    "fcvt_xf": (FSETUP, [("f", "fcvt.xf f33 = f33")], 4),
+    "setf_fcvt_getf": (ISETUP, [("m", "setf.sig f32 = r34"),
+                                ("f", "fcvt.xf f33 = f32"),
+                                ("m", "getf.sig r34 = f33")], 15),
+    "setf_xma_getf": (ISETUP, [("m", "setf.sig f32 = r34"),
+                               ("f", "xma.l f33 = f32, f0, f32"),
+                               ("m", "getf.sig r34 = f33")], 15),
+    "setf_fma_getf_d": (FSETUP, [("m", "getf.d r34 = f33"),
+                                 ("m", "setf.d f32 = r34"),
+                                 ("f", "fma.d f33 = f32, f1, f0")], 15),
     # FP: Fmac and Fmisc are 4 to either.
     "fma": (FSETUP, [("f", "fma.d f33 = f33, f32, f34")], 4),
     "fmerge": (FSETUP, [("f", "fmerge.s f33 = f33, f33")], 4),
