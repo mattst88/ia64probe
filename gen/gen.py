@@ -28,6 +28,7 @@ MODULES = [
     "tests_zhash",
     "tests_mport",
     "tests_stmiss",
+    "tests_stburst",
 ]
 
 
