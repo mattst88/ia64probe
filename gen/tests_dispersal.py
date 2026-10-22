@@ -165,6 +165,27 @@ GROUPS = {
     "bbb_nop2": ([B("bbb"), B("bbb", None, None, "nop.b 0 ;;")], None),
     "mib_mib_add": ([B("mib", add(50), add(51)),
                      B("mib", add(52), add(53), "nop.b 0 ;;")], 1),
+    # A group that starts after a stop in the middle of a bundle, with
+    # nothing of its own there: gemm's kernel, whose second group is the
+    # nop after the stop and two whole bundles. The rest of the split
+    # bundle takes a place in the second group's cycle, so it takes three
+    # cycles; with the stop at the end of the bundle it takes two.
+    "split_nop": ([B("mmf", add(50), add(51), fma(50)),
+                   B("mii", add(52), "nop.i 0 ;;", None),
+                   B("mmi", add(53), add(54), None),
+                   B("mfi", add(55), fma(51), "nop.i 0 ;;")], 3),
+    "split_mnop": ([B("mmf", add(50), add(51), fma(50)),
+                    B("mmi", add(52) + " ;;", None, None),
+                    B("mmi", add(53), add(54), None),
+                    B("mfi", add(55), fma(51), "nop.i 0 ;;")], 3),
+    "split_end": ([B("mmf", add(50), add(51), fma(50)),
+                   B("mii", add(52), None, "nop.i 0 ;;"),
+                   B("mmi", add(53), add(54), None),
+                   B("mfi", add(55), fma(51), "nop.i 0 ;;")], 2),
+    "split_add": ([B("mmf", add(50), add(51), fma(50)),
+                   B("mii", add(52), "nop.i 0 ;;", add(56)),
+                   B("mmi", add(53), add(54), None),
+                   B("mfi", add(55), fma(51), "nop.i 0 ;;")], 3),
 }
 
 
