@@ -612,6 +612,20 @@ def dtlb_chain(n, step=4096):
     return body, setup
 
 
+# The same as zlgm with C dependent L1D loads, 2 cycles each, between the
+# stores and the loads of their line: how long the line takes to come from
+# memory.  4224 bytes apart, 17 MB a call.
+for c in (25, 50, 100, 150, 200, 240):
+    BLOCKS[f"zlgmc_c{c}"] = ([
+        one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
+        B("mii", None, "adds r37 = -2, r34", "adds r38 = -16, r34 ;;")] +
+        [one("m", "ld8 r52 = [r52]")] * c + [
+        one("m", "ld1 r44 = [r37]"), one("m", "ld1 r45 = [r38]"),
+        B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
+          "adds r39 = 14, r34 ;;"),
+        B("mmi", "st1 [r39] = r44", None, "adds r34 = 4208, r34 ;;")],
+        ["mov r52 = r33"])
+
 for n in (8, 16, 24, 28, 30, 31, 32, 33, 34, 36, 40, 48, 64):
     BLOCKS[f"dtlb_chain_p{n}"] = dtlb_chain(n)
 for n in (16, 31, 32, 33, 34, 48, 64):
@@ -1023,6 +1037,20 @@ for off in (16, 128):
             B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
               "adds r39 = 14, r34 ;;"),
             B("mmi", "st1 [r39] = r44", None, "adds r34 = 112, r34 ;;")], [])
+# zline_o16 and zlg_o16 with the stores 2176 bytes apart, 35 MB a call,
+# so every line they reach comes from memory, as when malloc writes a chunk
+# header into the top of a heap that has just grown.
+for gap in (0, 8, 24, 56):
+    STORES[f"zlgm_g{gap}"] = ([
+        one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
+        B("mii", None, "adds r37 = -2, r34", "adds r38 = -16, r34 ;;")] +
+        [GAP] * gap + [
+        one("m", "ld1 r44 = [r37]"), one("m", "ld1 r45 = [r38]"),
+        B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
+          "adds r39 = 14, r34 ;;"),
+        B("mmi", "st1 [r39] = r44", None, "adds r34 = 2160, r34 ;;")], [])
+
+
 # The same with the write pointer back where it started each body, so every
 # line stays in L1D and L2.
 for off in (16, 32, 64, 256):
@@ -1034,6 +1062,50 @@ for off in (16, 32, 64, 256):
         B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
           "adds r39 = 14, r34 ;;"),
         B("mmi", "st1 [r39] = r44", None, "adds r34 = -16, r34 ;;")], [])
+
+# zmatch_warm_o16 with one of its memory operations made a nop (zmw_xN,
+# N counting from the first st8), to find what its 12 cycles wait on.
+ZMW = [("st8 [r34] = r40, 8", "adds r34 = 8, r34"),
+       ("st8 [r34] = r40, 8", "adds r34 = 8, r34"),
+       ("ld1 r44 = [r37]", "mov r44 = r0"), ("ld1 r45 = [r38]", "mov r45 = r0"),
+       ("st1 [r34] = r45", None), ("ld1 r44 = [r37]", "mov r44 = r0"),
+       ("st1 [r39] = r44", None)]
+for x in range(-1, len(ZMW)):
+    o = [m if i != x else r for i, (m, r) in enumerate(ZMW)]
+    STORES[f"zmw_x{x + 1}" if x >= 0 else "zmw_full"] = ([
+        one("m", o[0]), one("m", o[1]),
+        B("mii", None, "adds r37 = -2, r34", "adds r38 = -16, r34 ;;"),
+        one("m", o[2]), one("m", o[3]),
+        B("mmi", o[4], o[5], "adds r39 = 14, r34 ;;"),
+        B("mmi", o[6], None, "adds r34 = -16, r34 ;;")], [])
+
+# zmw_full with the second st1 moved to r34+16+A (zmv_aA), and with the
+# load whose byte the first st1 stores reading r34+16+L (zmv_lL), to find
+# which address relations its 3 cycles need.  On an Itanium 9340 the best
+# run takes 12 cycles with the second st1 in the first st1's 16 bytes and
+# not 4-byte aligned (or on its byte), else 9; 10 with the load from the
+# second st8's word, 9 from the next 128-byte line; and one empty group
+# anywhere takes the extra cycles away.  Many runs instead settle at 21 to
+# 25 cycles a body for all of them.
+def zmv(a=14, l=-16, g45=0, g56=0):
+    return [one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
+            B("mii", None, "adds r37 = -2, r34", f"adds r38 = {l}, r34 ;;"),
+            one("m", "ld1 r44 = [r37]"), one("m", "ld1 r45 = [r38]")] + \
+        [GAP] * g45 + [
+            B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
+              f"adds r39 = {a}, r34 ;;")] + [GAP] * g56 + [
+            B("mmi", "st1 [r39] = r44", None, "adds r34 = -16, r34 ;;")]
+# ... with G empty groups before the first st1 (zmv_pG) or after it
+# (zmv_qG), and the same with the load from the next 128-byte line.
+for g in (1, 2, 3, 4, 6):
+    STORES[f"zmv_p{g}"] = (zmv(g45=g), [])
+    STORES[f"zmv_q{g}"] = (zmv(g56=g), [])
+    STORES[f"zmv_p{g}_l112"] = (zmv(l=112, g45=g), [])
+    STORES[f"zmv_q{g}_l112"] = (zmv(l=112, g56=g), [])
+for a in list(range(32)) + [48, 64, 112]:
+    STORES[f"zmv_a{a}"] = (zmv(a=a), [])
+for l in list(range(-16, 16)) + [16, 32, 48, 64, 112]:
+    STORES[f"zmv_l{l}".replace("-", "m")] = (zmv(l=l), [])
 
 # zstd's 16-byte match copy as clang schedules it in ZSTD_decompressSequences:
 # byte 14 read ahead by ld1.sa, then sixteen ld1/st1 pairs two to a group, the
