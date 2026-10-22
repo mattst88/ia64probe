@@ -68,6 +68,33 @@ def near(br, groups, n, ec, gap):
     return out
 
 
+def late(br, groups, n, ec, src):
+    """ar.lc from a value that arrives late: ready (adds), through
+    setf/getf (getf), or through setf/xmpy/getf (xmpy), as fread's
+    item-size multiply feeds memcpy's byte loop."""
+    out = [B("mii", None, "mov r62 = ar.lc", f"adds r22 = {n}, r0"),
+           B("mii", None, f"mov.i ar.ec = {ec}", "nop.i 0 ;;"),
+           B("mii", None, "mov pr.rot = 0x10000", "nop.i 0 ;;")]
+    if src == "getf":
+        out += [B("mmi", "setf.sig f7 = r22", None, "nop.i 0 ;;"),
+                B("mmi", "getf.sig r22 = f7", None, "nop.i 0 ;;")]
+    elif src == "xmpy":
+        out += [B("mii", None, "adds r23 = 1, r0", "nop.i 0 ;;"),
+                B("mmi", "setf.sig f7 = r22", "setf.sig f8 = r23",
+                  "nop.i 0 ;;"),
+                B("mmf", None, None, "xmpy.l f7 = f7, f8 ;;"),
+                B("mmi", "getf.sig r22 = f7", None, "nop.i 0 ;;")]
+    out += [B("mii", None, "adds r22 = -1, r22", "nop.i 0 ;;"),
+            B("mii", None, "mov.i ar.lc = r22", "nop.i 0 ;;")]
+    for g in range(groups - 1):
+        out += [B("mfi", None, "fma f32 = f6, f6, f0", "nop.i 0 ;;",
+                  label="1" if g == 0 else None)]
+    out += [B("mfb", None, "fma f33 = f6, f6, f0", f"{br}.sptk.few 1b ;;",
+              label="1" if groups == 1 else None)]
+    out += [B("mii", None, "mov.i ar.lc = r62", "nop.i 0 ;;")]
+    return out
+
+
 def kernels():
     ks = []
     for br in ("br.ctop", "br.cloop"):
@@ -108,4 +135,13 @@ def kernels():
                            near(br, groups, n, ec, 1), ["mov f6 = f1"],
                            meta={"br": br, "groups": groups, "n": n,
                                  "ec": ec}, bodies=2)
+    for br, ec in (("br.ctop", 1), ("br.cloop", 0)):
+        for groups in (2, 3):
+            for n in (4, 16):
+                for src in ("adds", "getf", "xmpy"):
+                    ks += pair(f"ctopl_{br[3:]}_g{groups}_n{n}_{src}",
+                               "ctop", late(br, groups, n, ec, src),
+                               ["mov f6 = f1"],
+                               meta={"br": br, "groups": groups, "n": n,
+                                     "ec": ec, "src": src}, bodies=2)
     return ks
