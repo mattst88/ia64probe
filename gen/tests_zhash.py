@@ -10,9 +10,9 @@ says 4.  These kernels replay that code over 32 KB of pseudo-random data,
 storing into a table of 2^(64-S) words (zh_t{S}).
 
 Hardware: 41 cycles a body at every table size, 4 MB included, and 41
-with the data 2 MB long; 47 with an ld4 of each slot before its st4.  The
-model says 39 and 52.  So the code alone does not stall at the getf.sig:
-the samples there come from its context in zstd.
+with the data 2 MB long; 43 with an ld4 of each slot before its st4, a
+group after the slot's address.  So the code alone does not stall at the
+getf.sig: the samples there come from its context in zstd.
 """
 
 from emit import Bundle as B, pair
@@ -80,7 +80,10 @@ def kernels():
     ks += pair("zh_d2m", "zhash", BODY, setup(47, 4 << 20, 1 << 18), {},
                bodies=4, iters=500)
     # Each st4 after an ld4 of its slot, as the main loop does.
-    ldst = BODY[:-2] + [
+    # The ld4 of r46's slot can't share the group that computes r46.
+    ldst = BODY[:-3] + [
+        B("mmi", "shladd r45 = r45, 2, r22 ;;", "shladd r46 = r46, 2, r22",
+          "nop.i 0 ;;"),
         B("mii", "ld4 r47 = [r45]", None, "nop.i 0"),
         B("mii", "ld4 r49 = [r46]", None, "nop.i 0 ;;"),
         B("mii", "st4 [r45] = r26", None, "nop.i 0 ;;"),
