@@ -795,6 +795,65 @@ for run in (2, 4, 8, 16, 32):
             ["movl r18 = 0x80000", "add r27 = r33, r18"])
         STORES[f"strun{run}_g{gaps}"] = (
             [one("m", "st1 [r34] = r40, 1")] * run + [GAP] * gaps, [])
+# fread's pattern: a 16-byte byte copy into one buffer, the FILE pointer
+# stored behind it, and the next call loading that pointer back GAPS groups
+# later while the copy's stores still drain (ld), or loading another word
+# (other).  Does the load wait for its store to leave the queue?  With the
+# source 4 KB from the buffer (a4k) or not, so loads alias stores in bits
+# 11:2 or not.
+for run in (8, 16):
+    for gaps in (8, 24, 40):
+        for kind, ptr, src in (("ld", "r36", 0x80000),
+                               ("other", "r37", 0x80000),
+                               ("na", "r36", 0x80200),
+                               ("nao", "r37", 0x80200)):
+            STORES[f"qslow{run}_g{gaps}_{kind}"] = (
+                [B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+                   "nop.i 0 ;;")] * run
+                + [B("mmi", "st8 [r36] = r41", None,
+                     f"adds r34 = -{run}, r34 ;;")]
+                + [GAP] * gaps
+                + [B("mmi", f"ld8 r44 = [{ptr}]", None,
+                     f"adds r27 = -{run}, r27 ;;"),
+                   B("mmi", None, None, "add r41 = r44, r0 ;;")],
+                [f"movl r18 = {src:#x}", "add r27 = r33, r18",
+                 "movl r18 = 0x40000", "add r36 = r33, r18",
+                 "movl r18 = 0x40100", "add r37 = r33, r18",
+                 "mov r41 = 0"])
+# fread's lock around its copy: lock word and owner stored before a
+# 16-byte byte copy into one buffer, both cleared GAPS groups after it,
+# then GAPS groups more.  The lock word stored by st4 (s4), as glibc does,
+# by st8 (s8), or no lock stores at all (none).  Does a store behind the
+# copy rewriting a word stored before it cost more than one cycle?
+for gaps in (4, 8, 12):
+    for kind in ("none", "s4", "s8"):
+        lk, ul = [], []
+        if kind != "none":
+            sz = kind[1]
+            lk = [B("mmi", f"st{sz} [r36] = r41", "st8 [r38] = r37",
+                    "nop.i 0 ;;")]
+            ul = [B("mmi", "st8 [r38] = r0", None, "nop.i 0 ;;"),
+                  B("mmi", f"st{sz} [r36] = r0", None, "nop.i 0 ;;")]
+        STORES[f"qlock_{kind}_g{gaps}"] = (
+            lk
+            + [B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+                 "nop.i 0 ;;")] * 16
+            + [B("mmi", None, None, "adds r34 = -16, r34"),
+               B("mmi", None, None, "adds r27 = -16, r27 ;;")]
+            + [GAP] * gaps + ul + [GAP] * gaps,
+            ["movl r18 = 0x80200", "add r27 = r33, r18",
+             "movl r18 = 0x40000", "add r36 = r33, r18",
+             "adds r38 = 8, r36", "mov r37 = r13", "mov r41 = 1"])
+# Eight byte stores to one doubleword, then mf to wait for them to leave,
+# then GAPS groups: to the bytes the body before wrote (re) or to the next
+# doubleword (fr).  How long after a byte store leaves does a store to the
+# same byte still take 6 cycles, not 5?
+for gaps in (0, 4, 8, 16, 32, 48):
+    for kind, step in (("re", -8), ("fr", 0)):
+        STORES[f"qmf_{kind}_g{gaps}"] = (
+            [one("m", "st1 [r34] = r40, 1") for i in range(8)]
+            + [B("mmi", "mf", None, f"adds r34 = {step}, r34 ;;")]
+            + [GAP] * gaps, [])
 # How many conflicting sub-word stores the pipeline queues before it
 # stalls: RUN st1s to the bytes of one word, then 48 groups the queue can
 # drain under, the first of them stepping to the next word.
