@@ -1053,6 +1053,82 @@ for name, parts in LDST.items():
         body.append(B("mii", None, "add r46 = r44, r0", "nop.i 0 ;;"))
     ZBYTE[f"ldst_{name}"] = body
 
+
+# linpack's saxpy loop as clang pipelines it: each iteration loads x[i],
+# x[i+1], y[i] and y[i+1] with four ldfs through four pointers, and stores
+# the y[i] and y[i+1] of 7 iterations back with two stfs, in one group of
+# MMF MMF MMF MFB.  The loop rotates its registers; here a body is 8
+# iterations, each writing its own registers, whose values nothing waits
+# for (the fmas read f100-f103, the stores store f100).  x at XOFF and y
+# at 128 KB + YOFF in the stream, both in L2 after the first call.  "mem"
+# has only the loads and stores, "ld" only the loads, "st" only the stores.
+def saxpy_setup(xoff, yoff):
+    y = 128 * 1024 + yoff
+    return [f"movl r18 = {STREAM + xoff:#x}", "add r60 = r33, r18",
+            "adds r61 = 4, r60", f"movl r18 = {STREAM + y:#x}",
+            "add r62 = r33, r18", "adds r63 = 4, r62",
+            "adds r58 = -56, r62", "adds r59 = -52, r62"] + [
+                f"mov f{r} = f1" for r in range(100, 104)]
+
+
+def saxpy_group(k, loads=True, stores=True, fmas=True):
+    def f(t):
+        return t if fmas else None
+    ld = loads or None
+    st = stores or None
+    r = 32 + 8 * k
+    return [B("mmf", st and "stfs [r58] = f100, 8",
+              st and "stfs [r59] = f100, 8",
+              f(f"fma.s f{r} = f100, f1, f101")),
+            B("mmf", ld and f"ldfs f{r + 1} = [r60], 8",
+              ld and f"ldfs f{r + 2} = [r61], 8",
+              f(f"fma.s f{r + 3} = f102, f103, f0")),
+            B("mmf", ld and f"ldfs f{r + 4} = [r62], 8",
+              ld and f"ldfs f{r + 5} = [r63], 8",
+              f(f"fma.s f{r + 6} = f102, f101, f0")),
+            B("mfb", None, f(f"fma.s f{r + 7} = f103, f1, f100"),
+              "nop.b 0 ;;")]
+
+
+SAXPY = {}
+for xo, yo in ((0, 0), (4, 4), (0, 4), (804, 1608)):
+    for kind, kw in (("full", {}), ("mem", {"fmas": False}),
+                     ("ld", {"stores": False, "fmas": False}),
+                     ("st", {"loads": False, "fmas": False}),
+                     ("fma", {"loads": False, "stores": False})):
+        SAXPY[f"saxpy_{kind}_x{xo}_y{yo}"] = (
+            [b for k in range(8) for b in saxpy_group(k, **kw)],
+            saxpy_setup(xo, yo))
+
+# gemm's inner loop as clang pipelines it: saxpy in doubles, y += a * x
+# over a row, each iteration loading x[j], x[j+1], y[j] and y[j+1] with
+# four ldfds through four pointers and storing y 7 iterations (112 bytes)
+# back with two stfds.  gemm's rows are 560 bytes, so x's L2 bank against
+# y's takes every value: x at XOFF, y at 128 KB + YOFF.
+def saxpyd_setup(xoff, yoff):
+    y = 128 * 1024 + yoff
+    return [f"movl r18 = {STREAM + xoff:#x}", "add r60 = r33, r18",
+            "adds r61 = 8, r60", f"movl r18 = {STREAM + y:#x}",
+            "add r62 = r33, r18", "adds r63 = 8, r62",
+            "adds r58 = -112, r62", "adds r59 = -104, r62"] + [
+                f"mov f{r} = f1" for r in range(100, 104)]
+
+
+def saxpyd_group(k):
+    r = 32 + 8 * k
+    return [B("mmf", "stfd [r58] = f100, 16", "stfd [r59] = f100, 16", None),
+            B("mmf", f"ldfd f{r + 1} = [r60], 16",
+              f"ldfd f{r + 2} = [r61], 16", None),
+            B("mmf", f"ldfd f{r + 4} = [r62], 16",
+              f"ldfd f{r + 5} = [r63], 16", None),
+            B("mfb", None, None, "nop.b 0 ;;")]
+
+
+for xo, yo in [(x, 0) for x in range(0, 256, 16)] + [(8, 0), (0, 8), (8, 8)]:
+    SAXPY[f"saxpyd_x{xo}_y{yo}"] = (
+        [b for k in range(8) for b in saxpyd_group(k)], saxpyd_setup(xo, yo))
+
+
 def kernels():
     ks = []
     for size in SIZES:
@@ -1112,4 +1188,156 @@ def kernels():
                    [one("m", "st1 [r34] = r40, 1")] * run
                    + [B("mmi", None, None, f"adds r34 = {-run % 8}, r34 ;;")]
                    + [GAP] * (127 - run), SSETUP, bodies=4)
+    for name, (body, setup) in SAXPY.items():
+        ks += pair(f"st_{name}", "memory", body, SSETUP + setup, bodies=2,
+                   iters=250)
     return ks
+
+
+def saxpy_mix(k, nld, nst, sname):
+    r = 32 + 8 * k
+    lds = [f"ldfs f{r + 1} = [r60], 8", f"ldfs f{r + 2} = [r61], 8",
+           f"ldfs f{r + 4} = [r62], 8", f"ldfs f{r + 5} = [r63], 8"][:nld]
+    sts = [f"stfs [r{sname}] = f100, 8", f"stfs [r{sname + 1}] = f100, 8"]
+    sts = sts[:nst]
+    m = (sts + [None] * (2 - nst)) + (lds + [None] * (4 - nld))
+    return [B("mmf", m[0], m[1], None), B("mmf", m[2], m[3], None),
+            B("mmf", m[4], m[5], None), B("mfb", None, None, "nop.b 0 ;;")]
+
+
+# r58/r59 store 56 bytes behind the y loads, r56/r57 64 KB on from them.
+for nld in (0, 1, 2, 3, 4):
+    for nst in (1, 2):
+        for sname, base in (("near", 58), ("far", 56)):
+            SAXPY[f"zz_mix_l{nld}_s{nst}_{sname}"] = (
+                [b for k in range(8) for b in saxpy_mix(k, nld, nst, base)],
+                saxpy_setup(0, 0) + ["movl r18 = 0x10000", "add r56 = r62, r18",
+                                     "adds r57 = 4, r56"])
+
+
+def dense(k, nld, nst, sbase, fp=True):
+    """nld loads (through r60-r63) and nst stores in one MMI MMI group."""
+    r = 32 + 8 * k
+    if fp:
+        lds = [f"ldfs f{r + j} = [r{60 + j}], 8" for j in range(nld)]
+        sts = [f"stfs [r{sbase + j}] = f100, 8" for j in range(nst)]
+    else:
+        lds = [f"ld4 r{64 + 4 * (k % 4) + j} = [r{60 + j}], 8"
+               for j in range(nld)]
+        sts = [f"st4 [r{sbase + j}] = r40, 8" for j in range(nst)]
+    m = sts + lds + [None] * (4 - nld - nst)
+    return [B("mmi", m[0], m[1], "nop.i 0"), B("mmi", m[2], m[3], "nop.i 0 ;;")]
+
+
+for fp in (True, False):
+    for nld, nst in ((1, 0), (2, 0), (3, 0), (4, 0), (0, 1), (0, 2), (1, 1),
+                     (2, 1), (2, 2), (3, 1), (1, 2)):
+        for sname, base in (("near", 58), ("far", 56)):
+            if nst == 0 and sname == "far":
+                continue
+            for yo in (0, 16, 804):
+                SAXPY[f"zz_dense_{'f' if fp else 'i'}_l{nld}_s{nst}_{sname}_y{yo}"] = (
+                    [b for k in range(8) for b in dense(k, nld, nst, base, fp)],
+                    saxpy_setup(0, yo) + ["movl r18 = 0x10000",
+                                          "add r56 = r62, r18",
+                                          "adds r57 = 4, r56"])
+
+
+def l2lat(R, nld, nst, sbase, n=24):
+    """n groups of nst stores and nld FP loads, load targets reused every R
+    groups: past the issue rate, a group costs the load latency over R."""
+    out = []
+    for g in range(n):
+        # The last group steps the pointers back, so the body covers the
+        # same 8n bytes each time.
+        inc = 8 if g < n - 1 else -8 * (n - 1)
+        lds = [f"ldfs f{32 + 4 * (g % R) + j} = [r{60 + j}], {inc}"
+               for j in range(nld)]
+        sts = [f"stfs [r{sbase + j}] = f100, {inc}" for j in range(nst)]
+        m = sts + lds + [None] * (4 - nld - nst)
+        out += [B("mmi", m[0], m[1], "nop.i 0"),
+                B("mmi", m[2], m[3], "nop.i 0 ;;")]
+    return out
+
+
+for R in (2, 3, 4, 6, 8, 12, 24):
+    for nld in (1, 2):
+        for nst, sname, base in ((0, "none", 58), (1, "near", 58),
+                                 (2, "near", 58), (1, "far", 56),
+                                 (2, "far", 56)):
+            SAXPY[f"zz_lat_r{R}_l{nld}_s{nst}{sname}"] = (
+                l2lat(R, nld, nst, base),
+                saxpy_setup(0, 804) + ["movl r18 = 0x10000",
+                                       "add r56 = r62, r18",
+                                       "adds r57 = 4, r56"])
+
+
+def l2pair(R, nld, nst, n=24):
+    """l2lat with the stores through r58 and r57, which setup places apart."""
+    out = []
+    for g in range(n):
+        inc = 8 if g < n - 1 else -8 * (n - 1)
+        lds = [f"ldfs f{32 + 4 * (g % R) + j} = [r{60 + j}], {inc}"
+               for j in range(nld)]
+        sts = [f"stfs [r{(58, 57)[j]}] = f100, {inc}" for j in range(nst)]
+        m = sts + lds + [None] * (4 - nld - nst)
+        out += [B("mmi", m[0], m[1], "nop.i 0"),
+                B("mmi", m[2], m[3], "nop.i 0 ;;")]
+    return out
+
+
+for d in (4, 8, 16, 128, 256, 512):
+    for R in (6, 24):
+        for nld in (0, 1, 2):
+            SAXPY[f"zz_pair_d{d}_r{R}_l{nld}"] = (
+                l2pair(R, nld, 2),
+                saxpy_setup(0, 804) + [f"adds r57 = {d}, r58"])
+
+
+def _fma_variant(k, op, n, src):
+    r = 32 + 8 * k
+    fs = [f"{op} f{r + i} = {src}" for i in range(n)] + [None] * 4
+    return [B("mmf", None, None, fs[0]), B("mmf", None, None, fs[1]),
+            B("mmf", None, None, fs[2]), B("mfb", None, fs[3], "nop.b 0 ;;")]
+
+
+def _zz_spaced(op, src, per, gap):
+    """per ops in a group, then gap empty groups; 8 such per body."""
+    out = []
+    for k in range(8):
+        out += _fma_variant(k, op, per, src)
+        out += [B("mfi", None, None, "nop.i 0 ;;")] * gap
+    return out
+
+
+_ZV = ["movl r18 = 0x3e99999a", "st4 [r33] = r18 ;;", "ldfs f9 = [r33] ;;",
+       "movl r18 = 0x3f333333", "st4 [r33] = r18 ;;", "ldfs f10 = [r33] ;;",
+       "mov f11 = f0"]
+for op in ("fadd.s", "fadd.d", "fadd.s.s1", "fadd.s.s3", "fsub.s"):
+    for per, gap in ((1, 0), (2, 0), (1, 1), (1, 3), (1, 7)):
+        SAXPY[f"zz_sp_{op.replace('.', '')}_{per}_{gap}"] = (_zz_spaced(op, "f100, f101", per,
+                                                         gap),
+                                              saxpy_setup(0, 0))
+SAXPY["zz_sp_fadds_inexact"] = (_zz_spaced("fadd.s", "f9, f10", 1, 0),
+                                saxpy_setup(0, 0) + _ZV)
+SAXPY["zz_sp_fmas_addzero"] = (_zz_spaced("fma.s", "f9, f10, f11", 1, 0),
+                               saxpy_setup(0, 0) + _ZV)
+SAXPY["zz_sp_fmas_inexact"] = (_zz_spaced("fma.s", "f9, f10, f9", 1, 0),
+                               saxpy_setup(0, 0) + _ZV)
+
+
+_ZLD = ["movl r18 = 0x3f800000", "st4 [r33] = r18 ;;", "ldfs f6 = [r33]",
+        "ldfs f7 = [r33]", "ldfs f8 = [r33] ;;"]
+for name, op, src, setup in (
+        ("fmas", "fma.s", "f100, f1, f101", []),
+        ("fmas_ld", "fma.s", "f6, f7, f8", _ZLD),
+        ("fmas1", "fma.s.s1", "f100, f1, f101", []),
+        ("fmas2", "fma.s.s2", "f100, f1, f101", []),
+        ("fma", "fma", "f100, f1, f101", []),
+        ("fmad_ld", "fma.d", "f6, f7, f8", _ZLD),
+        ("fmpys", "fmpy.s", "f100, f101", []),
+        ("fadds", "fadd.s", "f100, f101", []),
+        ("fmas_f1", "fma.s", "f1, f1, f0", [])):
+    SAXPY[f"zz_{name}"] = (
+        [b for k in range(8) for b in _fma_variant(k, op, 1, src)],
+        saxpy_setup(0, 0) + setup)
