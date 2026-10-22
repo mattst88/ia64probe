@@ -26,6 +26,7 @@ MODULES = [
     "tests_taken",
     "tests_ldstream",
     "tests_zhash",
+    "tests_mport",
 ]
 
 
