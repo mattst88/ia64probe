@@ -29,6 +29,7 @@ MODULES = [
     "tests_mport",
     "tests_stmiss",
     "tests_stburst",
+    "tests_cbranch",
 ]
 
 
