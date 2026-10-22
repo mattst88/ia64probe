@@ -775,6 +775,20 @@ for a in (0, 1, 5, 20):
                 [one("m", f"ld8.a r{44 + k} = [r{84 + k}]")
                  for k in range(33)] + [GAP] * 8 + alat_checks([a, j]),
                 ALAT_ADDRS + WARM)
+# A chk.a.clr of an ld8.a, with a store between that kills its entry
+# (fail) or to another line (pass): what branching to recovery code (a
+# reload and a branch back) costs.  The check's group follows the store's
+# by two cycles, so the ALAT compares 20 address bits.
+for kind, sto in (("fail", 0), ("pass", 256)):
+    BLOCKS[f"chka_{kind}"] = ([
+        one("m", "ld8.a r44 = [r33]"), one("m", "st8 [r36] = r45"), GAP,
+        one("m", "chk.a.clr r44, 1f"),
+        B("mmi", None, None, "add r40 = r40, r44 ;;", label="2"),
+        B("mib", None, None, "br.cond.sptk.few 3f ;;"),
+        B("mmi", "ld8 r44 = [r33]", None, "nop.i 0 ;;", label="1"),
+        B("mib", None, None, "br.cond.sptk.few 2b ;;"),
+        B("mmi", None, None, "nop.i 0 ;;", label="3")],
+        [f"adds r36 = {sto}, r33", "mov r45 = 0"] + WARM)
 # The same copy in a stream: 16 bytes written with two st8, then bytes 0 and
 # 14 copied from OFF bytes behind the write pointer, as zstd's decoder copies
 # a match from output it wrote shortly before; "plain" without the advanced
