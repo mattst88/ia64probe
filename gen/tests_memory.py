@@ -117,6 +117,46 @@ STORES = {
     "st_ld_other": ([one("m", "st8 [r42] = r34"),
                      one("m", "ld8 r34 = [r33]")], []),
 }
+# The same address stored every cycle by other kinds of store, and the
+# next cycle's first store over what the cycle before's second wrote
+# (st_zz_pair_d8_*_l0 costs 1 a group with stfs): which stores wait.
+for name, op in (("st4", "st4 [r33] = r40"), ("stfs", "stfs [r33] = f1"),
+                 ("stfd", "stfd [r33] = f1"), ("stf8", "stf8 [r33] = f1")):
+    STORES[f"same_{name}"] = ([B("mmi", op, None, "nop.i 0 ;;")], [])
+for name, op in (("st8", "st8 [r{}] = r40, 8"), ("st4", "st4 [r{}] = r40, 8"),
+                 ("stfs", "stfs [r{}] = f1, 8"), ("stfd", "stfd [r{}] = f1, 8")):
+    STORES[f"chain_{name}"] = ([B("mmi", op.format(34), op.format(35),
+                                  "nop.i 0 ;;")], [])
+    STORES[f"chainrev_{name}"] = ([B("mmi", op.format(35), op.format(34),
+                                     "nop.i 0 ;;")], [])
+STORES["same_slot1"] = ([B("mmi", None, st("r33"), "nop.i 0 ;;")], [])
+STORES["same_swap"] = ([B("mmi", st("r33"), None, "nop.i 0 ;;"),
+                        B("mmi", None, st("r33"), "nop.i 0 ;;")], [])
+STORES["same_swap_o"] = ([B("mmi", st("r33"), "nop.m 0", "nop.i 0 ;;"),
+                          B("mmi", "ld8 r50 = [r42]", st("r33"),
+                            "nop.i 0 ;;")], [])
+# k stores in a row, one a cycle, to each doubleword of a stream: is only a
+# third store to an address held up?  And a store to the address the store
+# k back wrote, in a stream: alt's pattern without a fixed address.
+for k in (2, 3, 4, 5, 6, 8, 12):
+    STORES[f"rep{k}"] = ([one("m", st("r34"))] * (k - 1)
+                         + [one("m", st("r34", 8))], [])
+STORES["same_r34"] = ([one("m", st("r34"))], [])
+STORES["rep24"] = ([one("m", st("r34"))] * 23 + [one("m", st("r34", 8))], [])
+STORES["rep4_r33"] = ([one("m", st("r33"))] * 3 + [one("m", st("r42"))], [])
+for k in (8, 24):
+    STORES[f"fix{k}"] = ([one("m", st("r34"))] * k, [])
+for k, g in ((4, 4), (8, 8), (8, 24), (8, 40), (16, 16), (16, 48), (24, 0),
+             (24, 24), (24, 40)):
+    STORES[f"burst{k}_g{g}"] = ([one("m", st("r34"))] * k + [GAP] * g, [])
+STORES["burst23_other"] = ([one("m", st("r34"))] * 23
+                           + [one("m", st("r42"))], [])
+STORES["rep48"] = ([one("m", st("r34"))] * 47 + [one("m", st("r34", 8))], [])
+STORES["rep24_back"] = ([one("m", st("r34"))] * 23
+                        + [one("m", st("r34", 8))]
+                        + [one("m", st("r34"))] * 23
+                        + [one("m", st("r34", -8))], [])
+STORES["rep2_g1"] = ([one("m", st("r34")), GAP, one("m", st("r34", 8))], [])
 # One store to a fixed address every k cycles: how long a store to an
 # address keeps the next one to it waiting.
 for k in range(1, 9):
