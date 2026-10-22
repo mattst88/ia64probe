@@ -27,22 +27,30 @@ NOP = B("mii", None, None, "nop.i 0 ;;")
 NOP2 = [B("mii", None, None, "nop.i 0"), B("mii", None, None, "nop.i 0 ;;")]
 
 
-def body(k, dist, hint, direct=False, wide=False):
+def body(k, dist, hint, direct=False, wide=False, same=False, call=False,
+         many=False):
     pre = [B("mmi", "ld8 r20 = [r21]", None, "adds r22 = 8, r22 ;;"),
            B("mmi", None, None, "and r22 = r19, r22 ;;"),
            B("mmi", None, None, "add r21 = r18, r22 ;;"),
            B("mii", None, "mov r23 = ip", "nop.i 0 ;;"),
-           B("mmi", None, None, "add r20 = r20, r23 ;;"),
-           B("mii", None, "mov b6 = r20", "nop.i 0 ;;")]
+           B("mmi", None, None, "add r20 = r20, r23 ;;")]
+    if not same:
+        pre.append(B("mii", None, "mov b6 = r20", "nop.i 0 ;;"))
     pre += (NOP2 if wide else [NOP]) * dist
-    pre.append(B("mib", None, None, "br.sptk.few 20001f ;;" if direct
-                 else f"br.{hint}.few b6 ;;"))
+    wh = "many" if many else "few"
+    br = (f"br.call.{hint}.{wh} b7 = b6 ;;" if call
+          else f"br.{hint}.{wh} b6 ;;")
+    pre.append(B("mib", None, "mov b6 = r20" if same else None,
+                 "br.sptk.few 20001f ;;" if direct else br))
+    if call:
+        pre.append(B("mib", None, None, "br.sptk.few 20000f ;;"))
     ip_at = 3
     t0 = len(pre)
     tgt = []
+    out = "br.ret.sptk.many b7 ;;" if call else "br.sptk.few 20000f ;;"
     for i in range(k):
         tgt += [B("mii", None, None, "nop.i 0 ;;",
-                  label="20001" if i == 0 else None)] + [NOP] * 2 + [B("mib", None, None, "br.sptk.few 20000f ;;")]
+                  label="20001" if i == 0 else None)] + [NOP] * 2 + [B("mib", None, None, out)]
     end = [B("mii", None, None, "nop.i 0 ;;", label="20000")]
     return pre + tgt + end, (t0 - ip_at) * 16
 
@@ -90,6 +98,22 @@ def kernels():
         b, base = body(4, dist, "sptk", wide=True)
         ks += pair(f"ib_k4_rnd_w{dist}_sptk", "branch", b,
                    setup(table(4, "rnd", base)), bodies=4)
+    # glibc's fwrite calls _IO_file_xsputn through the vtable: mov b6 in
+    # the branch's own group ("same"), a br.call returning through b7
+    # ("call"), and the .many hint.
+    for k, order in ((1, "seq"), (4, "rnd")):
+        for name, kw in (("same", dict(same=True)),
+                         ("many", dict(many=True)),
+                         ("call", dict(call=True)),
+                         ("callmany", dict(call=True, many=True)),
+                         ("callsame", dict(call=True, many=True,
+                                           same=True))):
+            b, base = body(k, 0, "sptk", **kw)
+            ks += pair(f"ib_{name}_k{k}_{order}_d0", "branch", b,
+                       setup(table(k, order, base)), bodies=4)
+        b, base = body(k, 12, "sptk", call=True, many=True)
+        ks += pair(f"ib_callmany_k{k}_{order}_d12", "branch", b,
+                   setup(table(k, order, base)), bodies=4)
     for dist in (0, 8):
         b, base = body(1, dist, "sptk", direct=True)
         ks += pair(f"ib_direct_d{dist}", "branch", b,
