@@ -73,6 +73,25 @@ def setup(offs):
     return out
 
 
+# Two routines after the loop that return through b7; r24 and r25 hold
+# their addresses.
+VSETUP = ["movl r24 = 77771f", "movl r25 = 77772f"]
+VTEARDOWN = ["br.sptk.few 77773f", "77771:", "br.ret.sptk.many b7",
+             "77772:", "br.ret.sptk.many b7", "77773:"]
+
+
+def vbody(dist, alt):
+    out = [B("mib", None, "mov b6 = r24", "nop.b 0 ;;")]
+    out += [NOP] * dist
+    out.append(B("mib", None, None, "br.call.sptk.many b7 = b6 ;;"))
+    if alt:
+        out += [B("mii", "mov r26 = r24", "mov r24 = r25", "nop.i 0 ;;"),
+                B("mii", None, "mov r25 = r26", "nop.i 0 ;;")]
+    else:
+        out += [NOP, NOP]
+    return out
+
+
 def kernels():
     ks = []
     for k, order in ((1, "seq"), (2, "seq"), (2, "rnd"), (4, "seq"),
@@ -114,6 +133,14 @@ def kernels():
         b, base = body(k, 12, "sptk", call=True, many=True)
         ks += pair(f"ib_callmany_k{k}_{order}_d12", "branch", b,
                    setup(table(k, order, base)), bodies=4)
+    # A call through a b6 written just before it, to one routine outside
+    # the bodies ("same"), or to one of two in turn ("alt"): is the
+    # penalty for a late write, or for a target that changed?
+    for alt in (False, True):
+        for dist in (0, 3, 12):
+            ks += pair(f"ibv_{'alt' if alt else 'same'}_d{dist}", "branch",
+                       vbody(dist, alt), VSETUP, bodies=4,
+                       teardown=VTEARDOWN)
     for dist in (0, 8):
         b, base = body(1, dist, "sptk", direct=True)
         ks += pair(f"ib_direct_d{dist}", "branch", b,
