@@ -23,6 +23,7 @@ MODULES = [
     "tests_icache",
     "tests_branch",
     "tests_stld",
+    "tests_taken",
 ]
 
 
