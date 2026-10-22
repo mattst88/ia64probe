@@ -1402,6 +1402,23 @@ def kernels():
                           "adds r35 = 16, r37 ;;")],
                        ring_setup(size, True) + ["adds r35 = 16, r34"],
                        {"footprint": size}, teardown=RING_TEARDOWN)
+    # With the key in the other half of the line (L1D line differs, L2
+    # line the same) or in the next line, as when mst's 24-byte node
+    # straddles them.
+    for size in (2 * MB, 64 * MB):
+        for off in (72, 144):
+            for kind, early, late in (
+                    ("spec", "ld8.sa r37 = [r34]", "ld8.c.clr r37 = [r34]"),
+                    ("late", None, "ld8 r37 = [r34]")):
+                ks += pair(f"hlx{off}_{kind}_{name_of(size)}", "memory",
+                           [one("m", "ld4 r36 = [r35]"),
+                            B("mmi", early, "cmp4.eq p6, p0 = r36, r40",
+                              "nop.i 0 ;;"),
+                            one("m", late),
+                            B("mii", None, "mov r34 = r37",
+                              f"adds r35 = {off}, r37 ;;")],
+                           ring_setup(size) + [f"adds r35 = {off}, r34"],
+                           {"footprint": size}, teardown=RING_TEARDOWN)
     # A second load of the line the key's ld4 missed, K empty groups after
     # it: when does a secondary miss get its data?
     for size in (128 * KB, 2 * MB, 64 * MB):
