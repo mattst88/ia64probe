@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /* ia64probe: the scratch area.
  *
- * 192 MB, aligned to 1 MB, zeroed, and laid out by the suites:
+ * 256 MB, aligned to 1 MB, zeroed, and laid out by the suites:
  *
- *   0 - 1 MB     words kernels read and write at small offsets from in1
- *   1 - 9 MB     store streams
- *   9 MB -       pointer-chase rings (gen/tests_memory.py RINGS)
+ *   0 - 1 MB       words kernels read and write at small offsets from in1
+ *   1 - 9 MB       store streams
+ *   9 - 178 MB     pointer-chase rings (gen/tests_memory.py RINGS)
+ *   192 - 256 MB   store streams too long for 1 - 9 MB (FAR)
  *
  * A ring is a cycle of pointers, one per `stride` bytes of its region, in
  * a random order (or in address order when sequential), so that a chain of
@@ -23,7 +24,6 @@ struct ring {
 
 #include "rings.inc"
 
-#define SCRATCH_BYTES (192UL << 20)
 #define SCRATCH_ALIGN (1UL << 20)
 
 static unsigned long

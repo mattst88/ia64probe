@@ -33,6 +33,9 @@ from tests_latency import one
 KB, MB = 1 << 10, 1 << 20
 RING_BASE = 9 * MB
 STREAM = 1 * MB
+# Store streams too long for the 8 MB before the rings: 64 MB after them.
+FAR = 192 * MB
+FSETUP = [f"movl r18 = {FAR:#x}", "add r34 = r33, r18"]
 SIZES = [8 * KB, 16 * KB, 32 * KB, 64 * KB, 128 * KB, 192 * KB, 256 * KB,
          384 * KB, 512 * KB, 1 * MB, 2 * MB, 4 * MB, 6 * MB, 8 * MB,
          16 * MB, 64 * MB]
@@ -614,7 +617,7 @@ def dtlb_chain(n, step=4096):
 
 # The same as zlgm with C dependent L1D loads, 2 cycles each, between the
 # stores and the loads of their line: how long the line takes to come from
-# memory.  4224 bytes apart, 17 MB a call.
+# memory.  4224 bytes apart, 17 MB a call, in FAR.
 for c in (25, 50, 100, 150, 200, 240):
     BLOCKS[f"zlgmc_c{c}"] = ([
         one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
@@ -624,7 +627,7 @@ for c in (25, 50, 100, 150, 200, 240):
         B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
           "adds r39 = 14, r34 ;;"),
         B("mmi", "st1 [r39] = r44", None, "adds r34 = 4208, r34 ;;")],
-        ["mov r52 = r33"])
+        FSETUP + ["mov r52 = r33"])
 
 for n in (8, 16, 24, 28, 30, 31, 32, 33, 34, 36, 40, 48, 64):
     BLOCKS[f"dtlb_chain_p{n}"] = dtlb_chain(n)
@@ -705,13 +708,18 @@ BLOCKS["cbc_dx"] = ([B("mii", None, f"adds r{100 + i} = {k}, r43",
 # Advanced loads and checks: ld8.a, a store SOFF bytes on (0 kills the
 # ALAT entry), then ld8.c.clr, its value feeding the next store; "plain"
 # uses ordinary loads.
+# An offset that would reach the rings moves both into FAR.
 for soff in (0, 8, 72, 128, 4096, 4100, 4104, 8192, 16384, 32768, 65536,
              1 << 17, 1 << 18, 1 << 19, 1 << 20, 1 << 21, 1 << 24):
+    far = soff >= RING_BASE
+    base, at = ("r37", FAR) if far else ("r33", 0)
     for kind, la, lc in (("alat", "ld8.a", "ld8.c.clr"), ("plain", "ld8", "ld8")):
         STORES[f"alat_{kind}_o{soff}"] = ([
-            one("m", f"{la} r34 = [r33]"), one("m", "st8 [r36] = r34"),
-            one("m", f"{lc} r34 = [r33]")],
-            [f"movl r18 = {soff}", "add r36 = r33, r18"] + WARM)
+            one("m", f"{la} r34 = [{base}]"), one("m", "st8 [r36] = r34"),
+            one("m", f"{lc} r34 = [{base}]")],
+            [f"movl r18 = {at + soff:#x}", "add r36 = r33, r18"] +
+            ([f"movl r18 = {at:#x}", "add r37 = r33, r18",
+              "ld8 r30 = [r37] ;;", "add r30 = r30, r0 ;;"] if far else WARM))
 # One store a cycle to consecutive addresses, SIZE bytes each and STRIDE
 # apart, or one every GAP+1 cycles: does a store wait for one to the same
 # word a cycle earlier when they write different bytes of it?
@@ -1039,7 +1047,8 @@ for off in (16, 128):
             B("mmi", "st1 [r39] = r44", None, "adds r34 = 112, r34 ;;")], [])
 # zline_o16 and zlg_o16 with the stores 2176 bytes apart, 35 MB a call,
 # so every line they reach comes from memory, as when malloc writes a chunk
-# header into the top of a heap that has just grown.
+# header into the top of a heap that has just grown.  In FAR: they would
+# run over the rings.
 for gap in (0, 8, 24, 56):
     STORES[f"zlgm_g{gap}"] = ([
         one("m", "st8 [r34] = r40, 8"), one("m", "st8 [r34] = r40, 8"),
@@ -1048,7 +1057,7 @@ for gap in (0, 8, 24, 56):
         one("m", "ld1 r44 = [r37]"), one("m", "ld1 r45 = [r38]"),
         B("mmi", "st1 [r34] = r45", "ld1 r44 = [r37]",
           "adds r39 = 14, r34 ;;"),
-        B("mmi", "st1 [r39] = r44", None, "adds r34 = 2160, r34 ;;")], [])
+        B("mmi", "st1 [r39] = r44", None, "adds r34 = 2160, r34 ;;")], FSETUP)
 
 
 # The same with the write pointer back where it started each body, so every

@@ -17,6 +17,10 @@
  * With --sim the program runs each kernel --reps times and prints which, in
  * order; the ia64perf plugin's itc= log has the modeled cycle at each ar.itc
  * read, two per call, and run/sim.py pairs them up.
+ *
+ * With -v it also checks, after each pair, that the pair left the rings
+ * as they were, and names any that did not: a kernel that walks off the
+ * end of the store streams breaks every later kernel chasing a ring.
  */
 #define _GNU_SOURCE
 #include <getopt.h>
@@ -46,6 +50,25 @@ median(uint64_t *v, unsigned n)
 {
 	qsort(v, n, sizeof *v, cmp_u64);
 	return v[n / 2];
+}
+
+/* Report, and restore so as to name only the first, each ring word that
+ * kernel K changed. */
+static void
+check(const struct kernel *k, unsigned char *scratch, uint64_t *ringw,
+      unsigned npages, unsigned page)
+{
+	if (!ringw)
+		return;
+	for (unsigned p = 0; p < npages; p++) {
+		uint64_t *w = (uint64_t *)(scratch + SCRATCH_RINGS + p * page);
+
+		if (*w == ringw[p])
+			continue;
+		fprintf(stderr, "clobber %s %u at %#lx\n", k->name, k->bodies,
+			SCRATCH_RINGS + (unsigned long)p * page);
+		*w = ringw[p];
+	}
 }
 
 static const struct kernel *
@@ -91,16 +114,19 @@ int
 main(int argc, char **argv)
 {
 	unsigned reps = 31;
-	int sim = 0, cpu = -1, c;
+	int sim = 0, verify = 0, cpu = -1, c;
 	double scale = 1.0;
 
-	while ((c = getopt(argc, argv, "r:sc:i:")) != -1) {
+	while ((c = getopt(argc, argv, "r:svc:i:")) != -1) {
 		switch (c) {
 		case 'r':
 			reps = strtoul(optarg, NULL, 0);
 			break;
 		case 's':
 			sim = 1;
+			break;
+		case 'v':
+			verify = 1;
 			break;
 		case 'c':
 			cpu = atoi(optarg);
@@ -109,7 +135,7 @@ main(int argc, char **argv)
 			scale = strtod(optarg, NULL);
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-s] [-r reps] [-c cpu] "
+			fprintf(stderr, "usage: %s [-s] [-v] [-r reps] [-c cpu] "
 				"[-i iter-scale] [prefix...]\n", argv[0]);
 			return 2;
 		}
@@ -129,6 +155,13 @@ main(int argc, char **argv)
 	const struct kernel *cal2b = find("cal_add", 64);
 	uint64_t *v = calloc(4 * reps, sizeof *v);
 	long long *d = calloc(reps, sizeof *d);
+	/* The first word of every page of the rings, which is a pointer of
+	 * any ring with a stride that divides the page. */
+	enum { PAGE = 4096, NPAGES = (SCRATCH_FAR - SCRATCH_RINGS) / PAGE };
+	uint64_t *ringw = verify ? calloc(NPAGES, sizeof *ringw) : NULL;
+
+	for (unsigned p = 0; verify && p < NPAGES; p++)
+		ringw[p] = *(uint64_t *)(scratch + SCRATCH_RINGS + p * PAGE);
 
 	if (!sim)
 		warm(0.5);
@@ -143,9 +176,11 @@ main(int argc, char **argv)
 		if (sim) {
 			for (unsigned r = 0; r < reps; r++) {
 				kb->fn(iters, scratch);
+				check(kb, scratch, ringw, NPAGES, PAGE);
 				printf("call %s %u %lu\n", kb->name, kb->bodies,
 				       iters);
 				k2b->fn(iters, scratch);
+				check(k2b, scratch, ringw, NPAGES, PAGE);
 				printf("call %s %u %lu\n", k2b->name,
 				       k2b->bodies, iters);
 			}
