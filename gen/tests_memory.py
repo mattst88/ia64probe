@@ -448,11 +448,89 @@ for name, order in (("brev", BREV_ORDER), ("up", list(range(8)))):
 STORES["w8_spread"] = ([one("m", f"st1 [r{88 + b}] = r40, 64")
                         for b in range(8)],
                        [f"adds r{88 + b} = {8 * b}, r34" for b in range(8)])
+# sha's byte reverse over 32-bit words, ld1 and st1 through one pointer
+# per access advancing 4: each group lists (op, byte, lead), a load of
+# byte b of the word lead words ahead or a store to byte b of this word of
+# the byte 3 - b loaded earlier.  "icc" is icc 11.1's kernel, a load and a
+# store a group, two of the loads a word ahead; "p2_aK" stores a word two
+# bytes a group and loads the word K ahead.  sha_info->data is 4 mod 8,
+# so each doubleword holds two words; "_o0" starts at 0 mod 8.
+BREVW_SHAPES = {
+    "icc": [[("st", 0, 0), ("ld", 1, 0)], [("ld", 0, 1), ("st", 3, 0)],
+            [("ld", 2, 0), ("st", 2, 0)], [("ld", 3, 1), ("st", 1, 0)]],
+    "icc_nodep": [[("st", 0, 0), ("ld", 1, 1)], [("ld", 0, 1), ("st", 3, 0)],
+                  [("ld", 2, 1), ("st", 2, 0)], [("ld", 3, 1), ("st", 1, 0)]],
+}
+for k in (1, 2, 4):
+    BREVW_SHAPES[f"p2_a{k}"] = [
+        [("st", 0, 0), ("st", 1, 0), ("ld", 0, k), ("ld", 1, k)],
+        [("st", 2, 0), ("st", 3, 0), ("ld", 2, k), ("ld", 3, k)]]
+    BREVW_SHAPES[f"p4_a{k}"] = [
+        [("st", 0, 0), ("st", 1, 0), ("ld", 0, k), ("ld", 1, k)],
+        [("st", 2, 0), ("st", 3, 0), ("ld", 2, k), ("ld", 3, k)],
+        [], []]
+
+
+def brevw(shape, words=4):
+    ops = [op for g in shape for op in g]
+    ptr = {i: f"r{80 + i}" for i in range(len(ops))}
+    val = lambda b, w: f"r{56 + 4 * (w % 4) + b}"
+    body = []
+    for w in range(words):
+        i = 0
+        for g in shape:
+            ins = []
+            for op, b, lead in g:
+                if op == "ld":
+                    ins.append(f"ld1 {val(b, w + lead)} = [{ptr[i]}], 4")
+                else:
+                    ins.append(f"st1 [{ptr[i]}] = {val(3 - b, w)}, 4")
+                i += 1
+            ins += [None] * (4 - len(ins))
+            body += [B("mmi", ins[0], ins[1], "nop.i 0"),
+                     B("mmi", ins[2], ins[3], "nop.i 0 ;;")]
+    return body
+
+
+def brevw_setup(shape, off):
+    ops = [op for g in shape for op in g]
+    return [f"adds r{80 + i} = {64 + off + b + 4 * (lead if op == 'ld' else 0)}"
+            ", r34" for i, (op, b, lead) in enumerate(ops)]
+
+
+for name, shape in BREVW_SHAPES.items():
+    for off, sfx in ((4, ""), (0, "_o0")):
+        STORES[f"brevw_{name}{sfx}"] = (brevw(shape),
+                                       brevw_setup(shape, off))
+
 # Eight doublewords a body: too long for STORES' eight bodies.
 BLOCKS = {"brev_block": (brev_element() * 8 + BREV_RESET, BREV_SETUP)}
 BLOCKS["brev_block_copy"] = (BREV_COPY + brev_element() * 8 + BREV_RESET,
                              BREV_SETUP + [f"adds r{96 + i} = {64 + 8 * i}, r34"
                                            for i in range(8)])
+
+
+# The same through one 64-byte block, sixteen words a body: alone, after
+# eight st8s rewrite it, and after those and sixteen ld4s read it, as
+# sha_update's memcpy and sha_transform do around each byte_reverse.
+def brevw_reset(n):
+    rs = [f"adds r{80 + i} = -64, r{80 + i}" for i in range(n)]
+    rs += [None] * (-len(rs) % 3)
+    return [B("mii", rs[i], rs[i + 1], rs[i + 2] or "nop.i 0")
+            for i in range(0, len(rs), 3)] + [B("mii", None, None,
+                                                  "nop.i 0 ;;")]
+
+
+BREVW_READ = [B("mmi", f"ld4 r{104 + (i % 4)} = [r{96 + (i // 2) % 8}]",
+                None, "nop.i 0 ;;") for i in range(16)]
+for name, shape in BREVW_SHAPES.items():
+    n = sum(len(g) for g in shape)
+    for pre, sfx in (([], ""), (BREV_COPY, "_copy"),
+                     (BREV_COPY + BREVW_READ, "_copyrd")):
+        BLOCKS[f"brevwb_{name}{sfx}"] = (
+            pre + brevw(shape, 16) + brevw_reset(n),
+            brevw_setup(shape, 4) + [f"adds r{96 + i} = {64 + 8 * i}, r34"
+                                     for i in range(8)])
 
 
 # clang's 32-byte wildcopy loop from zstd's ZSTD_decompressSequences, its
