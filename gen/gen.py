@@ -20,6 +20,7 @@ MODULES = [
     "tests_waw",
     "tests_memory",
     "tests_rse",
+    "tests_icache",
 ]
 
 
