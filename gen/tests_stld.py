@@ -112,4 +112,21 @@ def kernels():
             ks += pair(f"stld_sr_b{k}_g{g}_{tag}", "stld", b,
                        SETUP + ["adds r39 = 192, r33"] + setup,
                        meta={"k": k, "g": g, "l1": tag == "l"})
+    # An st8 of a word, then after d cycles an ldfd of the same word (if_dD)
+    # or of a word of another line (if_xD), as icc's bh reloads a struct
+    # argument it has just spilled into FP registers; the value goes back to
+    # the next store through getf.d.  ff_dD and ff_xD store it with stfd.
+    for d in (0, 1, 2, 3, 4, 6, 8, 12):
+        for tag, other in (("d", False), ("x", True)):
+            ld = "mov r38 = r37" if other else "mov r38 = r36"
+            for st, pre in (("if", []),
+                            ("ff", [B("mmi", "setf.d f7 = r40 ;;", None,
+                                      None)])):
+                sti = "stfd [r36] = f7" if st == "ff" else "st8 [r36] = r40"
+                b = [*pre, B("mmi", sti, None, "nop.i 0 ;;"), *wait(d),
+                     B("mmi", "ldfd f6 = [r38] ;;", None, None),
+                     B("mmi", "getf.d r41 = f6 ;;", None, None),
+                     B("mmi", None, None, "adds r40 = 1, r41 ;;")]
+                ks += pair(f"stld_{st}_{tag}{d}", "stld", b, SETUP + [ld],
+                           bodies=4)
     return ks
