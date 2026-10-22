@@ -7,7 +7,8 @@ copies of the body each static branch sees every Nth outcome.  A table of
 period p with a single not-taken outcome (the exit of a loop of p - 1
 iterations) looks the same to every copy when p is odd, so those are the
 patterns ("lp<p>"); "rnd<k>" tables are random with k% not taken, and "t"
-and "nt" never change.  _sptk/_dpnt change the hint from dptk.
+and "nt" never change.  _sptk/_dpnt/_spnt change the hint from dptk; cbs_
+computes the predicate in the branch's own group.
 """
 
 from __future__ import annotations
@@ -19,11 +20,13 @@ from emit import Bundle as B, pair
 TABLE = 0xE0000
 
 
-def body(hint):
+def body(hint, same=False):
     return [B("mmi", "ld1 r20 = [r21], 1", None, "nop.i 0 ;;"),
             B("mmi", "cmp.eq p8, p9 = r21, r19", None, "nop.i 0 ;;"),
-            B("mmi", "(p8) mov r21 = r18", None, "cmp.ne p6, p7 = r0, r20 ;;"),
-            B("mib", None, None, f"(p6) br.cond.{hint}.few 1f ;;"),
+            B("mmi", "(p8) mov r21 = r18", None,
+              "nop.i 0 ;;" if same else "cmp.ne p6, p7 = r0, r20 ;;"),
+            B("mib", "cmp.ne p6, p7 = r0, r20" if same else None, None,
+              f"(p6) br.cond.{hint}.few 1f ;;"),
             B("mib", None, None, "br.sptk.few 2f ;;"),
             B("mii", None, None, "nop.i 0 ;;", label="1"),
             B("mii", None, None, "nop.i 0 ;;", label="2")]
@@ -59,9 +62,16 @@ def kernels():
     for name, t in tables.items():
         ks += pair(f"cb_{name}", "cbranch", body("dptk"), setup(t),
                    meta={"pattern": name, "taken": sum(t), "n": len(t)})
-    for hint in ("sptk", "dpnt"):
+    for hint in ("sptk", "dpnt", "spnt"):
         for name in ("t", "nt", "lp5", "rnd50"):
             ks += pair(f"cb_{name}_{hint}", "cbranch", body(hint),
                        setup(tables[name]),
                        meta={"pattern": name, "hint": hint})
+    # The compare in the branch's group, as glibc's fwrite tests the
+    # result of its _IO_acquire_lock (cmp4.eq and .spnt branch in one MIB).
+    for hint in ("dptk", "sptk", "dpnt", "spnt"):
+        for name in ("t", "nt", "lp5"):
+            ks += pair(f"cbs_{name}_{hint}", "cbranch", body(hint, True),
+                       setup(tables[name]),
+                       meta={"pattern": name, "hint": hint, "same": 1})
     return ks
