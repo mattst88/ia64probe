@@ -22,6 +22,7 @@ MODULES = [
     "tests_rse",
     "tests_icache",
     "tests_branch",
+    "tests_stld",
 ]
 
 
