@@ -1340,6 +1340,20 @@ def kernels():
         ks += pair(f"qchase_k{k}_st", "memory", sts,
                    ring_setup(128 * KB) + ["adds r36 = 72, r33"],
                    teardown=RING_TEARDOWN)
+    # The chase writing the second word of the line it is about to load
+    # (chase_dirty_*), so the store misses first, or of the line it just
+    # loaded (chase_dcur_*); either way every line L3 evicts is dirty.
+    for size in (2 * MB, 6 * MB, 16 * MB, 64 * MB):
+        ks += pair(f"chase_dirty_{name_of(size)}", "memory",
+                   [one("m", "ld8 r34 = [r34]"),
+                    B("mii", None, "adds r41 = 8, r34", "nop.i 0 ;;"),
+                    one("m", "st8 [r41] = r40")], ring_setup(size),
+                   {"footprint": size}, teardown=RING_TEARDOWN)
+        ks += pair(f"chase_dcur_{name_of(size)}", "memory",
+                   [B("mii", None, "adds r41 = 8, r34", "nop.i 0 ;;"),
+                    one("m", "ld8 r34 = [r34]"),
+                    one("m", "st8 [r41] = r40")], ring_setup(size),
+                   {"footprint": size}, teardown=RING_TEARDOWN)
     for size in SEQ:
         ks += pair(f"chase_seq_{name_of(size)}", "memory",
                    [one("m", "ld8 r34 = [r34]")], ring_setup(size, True),
