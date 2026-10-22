@@ -67,6 +67,14 @@ def kernels():
             ks += pair(f"cb_{name}_{hint}", "cbranch", body(hint),
                        setup(tables[name]),
                        meta={"pattern": name, "hint": hint})
+    # One taken outcome among many not taken, as memcpy's n == 0 test sees
+    # one zero-length copy: does a static hint stay "taken" once it has
+    # been, or does the branch then learn?
+    for n in (63, 511):
+        t = [1] + [0] * (n - 1)
+        for hint in ("dptk", "sptk", "dpnt", "spnt"):
+            ks += pair(f"cb1_{n}_{hint}", "cbranch", body(hint), setup(t),
+                       meta={"pattern": f"one{n}", "hint": hint})
     # The compare in the branch's group, as glibc's fwrite tests the
     # result of its _IO_acquire_lock (cmp4.eq and .spnt branch in one MIB).
     for hint in ("dptk", "sptk", "dpnt", "spnt"):
