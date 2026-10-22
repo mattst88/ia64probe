@@ -1354,6 +1354,71 @@ def kernels():
                     one("m", "ld8 r34 = [r34]"),
                     one("m", "st8 [r41] = r40")], ring_setup(size),
                    {"footprint": size}, teardown=RING_TEARDOWN)
+    # mst's HashLookup: the key's ld4 misses, the compare waiting for it
+    # shares a group with a ld8.sa of the next pointer from the same line
+    # (hl_spec), and a ld8.c.clr checks it in the next group; or a plain
+    # ld8 there (hl_early), or in the check's place (hl_late).
+    for size in (16 * KB, 128 * KB, 2 * MB, 64 * MB):
+        for kind, early, late in (
+                ("spec", "ld8.sa r37 = [r34]", "ld8.c.clr r37 = [r34]"),
+                ("early", "ld8 r37 = [r34]", None),
+                ("late", None, "ld8 r37 = [r34]")):
+            ks += pair(f"hl_{kind}_{name_of(size)}", "memory",
+                       [one("m", "ld4 r36 = [r35]"),
+                        B("mmi", early, "cmp4.eq p6, p0 = r36, r40",
+                          "nop.i 0 ;;"),
+                        one("m", late) if late else GAP,
+                        B("mii", None, "mov r34 = r37",
+                          "adds r35 = 16, r37 ;;")],
+                       ring_setup(size) + ["adds r35 = 16, r34"],
+                       {"footprint": size}, teardown=RING_TEARDOWN)
+    # A second load of the line the key's ld4 missed, K empty groups after
+    # it: when does a secondary miss get its data?
+    for size in (128 * KB, 2 * MB, 64 * MB):
+        for k in (0, 1, 2, 4, 8, 12, 16, 24):
+            first = (B("mmi", "ld4 r36 = [r35]", "ld8 r37 = [r34]",
+                       "nop.i 0 ;;") if k == 0 else
+                     one("m", "ld4 r36 = [r35]"))
+            ks += pair(f"hlsec_k{k}_{name_of(size)}", "memory",
+                       [first] + [GAP] * (k - 1) +
+                       ([one("m", "ld8 r37 = [r34]")] if k else []) +
+                       [B("mmi", None, "cmp4.eq p6, p0 = r36, r40",
+                          "nop.i 0 ;;"),
+                        B("mii", None, "mov r34 = r37",
+                          "adds r35 = 16, r37 ;;")],
+                       ring_setup(size) + ["adds r35 = 16, r34"],
+                       {"footprint": size}, teardown=RING_TEARDOWN)
+    # The same with the key in the line's other 64-byte half.
+    for size in (128 * KB, 2 * MB, 64 * MB):
+        for k in (1, 4, 12):
+            ks += pair(f"hlsec_h{k}_{name_of(size)}", "memory",
+                       [one("m", "ld4 r36 = [r35]")] + [GAP] * (k - 1) +
+                       [one("m", "ld8 r37 = [r34]"),
+                        B("mmi", None, "cmp4.eq p6, p0 = r36, r40",
+                          "nop.i 0 ;;"),
+                        B("mii", None, "mov r34 = r37",
+                          "adds r35 = 80, r37 ;;")],
+                       ring_setup(size) + ["adds r35 = 80, r34"],
+                       {"footprint": size}, teardown=RING_TEARDOWN)
+    # bzip2's cftab pass: a ld8 the chase goes through and a second load
+    # of the same word (or the next) in its group, in either slot: does
+    # the second hold back the first's data?
+    for size in (16 * KB, 128 * KB, 2 * MB):
+        for kind, second, off, swap in (
+                ("none", None, 0, False),
+                ("same", "ld8 r36 = [r35]", 0, False),
+                ("sa", "ld8.sa r36 = [r35]", 0, False),
+                ("off8", "ld8 r36 = [r35]", 8, False),
+                ("same_sw", "ld8 r36 = [r35]", 0, True),
+                ("sa_sw", "ld8.sa r36 = [r35]", 0, True)):
+            loads = ([second, "ld8 r37 = [r34]"] if swap else
+                     ["ld8 r37 = [r34]", second])
+            ks += pair(f"ldpair_{kind}_{name_of(size)}", "memory",
+                       [B("mmi", loads[0], loads[1], "nop.i 0 ;;"),
+                        B("mii", None, "mov r34 = r37",
+                          f"adds r35 = {off}, r37 ;;")],
+                       ring_setup(size) + [f"adds r35 = {off}, r34"],
+                       {"footprint": size}, teardown=RING_TEARDOWN)
     for size in SEQ:
         ks += pair(f"chase_seq_{name_of(size)}", "memory",
                    [one("m", "ld8 r34 = [r34]")], ring_setup(size, True),
