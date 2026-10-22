@@ -61,4 +61,40 @@ def kernels():
                  B("mmi", "ld8 r41 = [r38] ;;", None, None),
                  B("mmi", None, None, "add r38 = r41, r38 ;;")]
             ks += pair(f"stld_{tag}{d}", "stld", b, setup, bodies=4)
+    # A 4-byte store, then after d cycles a 4-byte load of the same bytes
+    # (s4_dD), of the other half of the doubleword (s4_hD), or of the next
+    # doubleword (s4_oD); s44_hD stores the word twice in a row first, as
+    # bzip2's partition loop swaps two equal pointers.
+    for d in (0, 1, 2, 4, 8, 16):
+        for tag, off, twice in (("s4_d", 0, False), ("s4_h", 4, False),
+                                ("s4_o", 8, False), ("s44_h", 4, True)):
+            ld = f"adds r38 = {off}, r36" if off else "mov r38 = r36"
+            sts = [B("mmi", "st4 [r36] = r40", None, "nop.i 0 ;;")]
+            if twice:
+                sts *= 2
+            b = [*sts, *wait(d),
+                 B("mmi", "ld4 r41 = [r38] ;;", None, None),
+                 B("mmi", None, None, "adds r40 = 1, r41 ;;")]
+            ks += pair(f"stld_{tag}{d}", "stld", b, SETUP + [ld], bodies=4)
+    # Two stores of a word in a row, then nothing (ss_n), or a load that
+    # nothing waits for of the other half (ss_h), the same bytes (ss_d) or
+    # another line (ss_x): does a load end a run of stores to those bytes?
+    for tag, ld in (("n", None), ("h", "ld4 r41 = [r38]"),
+                    ("d", "ld4 r41 = [r36]"), ("x", "ld4 r41 = [r37]")):
+        st = B("mmi", "st4 [r36] = r40", None, "nop.i 0 ;;")
+        b = [st, st, B("mmi", ld, None, "nop.i 0 ;;"),
+             B("mmi", None, None, "nop.i 0 ;;")]
+        ks += pair(f"stld_ss_{tag}", "stld", b,
+                   SETUP + ["adds r38 = 4, r36"], bodies=4)
+    # Bursts of k st8s a cycle to one doubleword, then g empty groups, to a
+    # line that a load brought into L1D (_l) or that nothing loads (_n):
+    # does the 5-cycle wait between such stores depend on L1D holding the
+    # line?
+    for k, g in ((1, 0), (2, 2), (4, 4), (8, 8), (8, 40), (16, 48)):
+        for tag, setup in (("l", ["ld8 r41 = [r39] ;;"]), ("n", [])):
+            b = ([B("mmi", "st8 [r39] = r40", None, "nop.i 0 ;;")] * k
+                 + wait(g))
+            ks += pair(f"stld_sr_b{k}_g{g}_{tag}", "stld", b,
+                       SETUP + ["adds r39 = 192, r33"] + setup,
+                       meta={"k": k, "g": g, "l1": tag == "l"})
     return ks
