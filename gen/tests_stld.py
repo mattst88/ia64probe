@@ -86,6 +86,21 @@ def kernels():
              B("mmi", None, None, "nop.i 0 ;;")]
         ks += pair(f"stld_ss_{tag}", "stld", b,
                    SETUP + ["adds r38 = 4, r36"], bodies=4)
+    # A store and a load of different sizes in one doubleword, d cycles
+    # apart, as zstd's match copy does: stld_sz_S_L_oO stores S bytes at
+    # r36 and loads L bytes at r36 + O.
+    for d in (0, 1, 2, 3, 4, 6, 8):
+        for sz, ld_sz, off in ((8, 1, 6), (8, 1, 0), (8, 4, 4), (1, 8, 0),
+                               (1, 1, 0), (1, 1, 1), (4, 1, 2)):
+            stop = {1: "st1", 4: "st4", 8: "st8"}[sz]
+            ldop = {1: "ld1", 4: "ld4", 8: "ld8"}[ld_sz]
+            b = [B("mmi", f"{stop} [r36] = r40", None, "nop.i 0 ;;"),
+                 *wait(d),
+                 B("mmi", f"{ldop} r41 = [r38] ;;", None, None),
+                 B("mmi", None, None, "adds r40 = 1, r41 ;;")]
+            ld = f"adds r38 = {off}, r36" if off else "mov r38 = r36"
+            ks += pair(f"stld_sz_{sz}_{ld_sz}_o{off}_d{d}", "stld", b,
+                       SETUP + [ld], bodies=4)
     # Bursts of k st8s a cycle to one doubleword, then g empty groups, to a
     # line that a load brought into L1D (_l) or that nothing loads (_n):
     # does the 5-cycle wait between such stores depend on L1D holding the
