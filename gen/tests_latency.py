@@ -134,6 +134,28 @@ CHAINS = {
     "setf_fma_getf_d": (FSETUP, [("m", "getf.d r34 = f33"),
                                  ("m", "setf.d f32 = r34"),
                                  ("f", "fma.d f33 = f32, f1, f0")], 15),
+    # health's my_rand: the high multiply, and the conversions and
+    # roundings of a long long to a float.
+    "setf_xmah_getf": (ISETUP, [("m", "setf.sig f32 = r34"),
+                                ("f", "xmpy.h f33 = f32, f32"),
+                                ("m", "getf.sig r34 = f33")], 15),
+    "setf_xmahu_getf": (ISETUP, [("m", "setf.sig f32 = r34"),
+                                 ("f", "xmpy.hu f33 = f32, f32"),
+                                 ("m", "getf.sig r34 = f33")], 15),
+    "fnorm_s": (FSETUP, [("f", "fnorm.s f33 = f33")], 4),
+    "fmpy_s1": (FSETUP, [("f", "fmpy.s1 f33 = f33, f1")], 4),
+    "fcvt_fnorm": (FSETUP, [("f", "fcvt.xf f33 = f33"),
+                            ("f", "fnorm.d f33 = f33")], 8),
+    # Back to a float each time: a chain of truncations alone reads its
+    # integer result as a float and takes a software assist.
+    "fcvt_fx_trunc": (FSETUP, [("f", "fcvt.fx.trunc.s1 f33 = f33"),
+                               ("f", "fcvt.xf f33 = f33"),
+                               ("f", "fnorm.d f33 = f33")], 12),
+    "setf_fcvt_fnorm_fx_getf": (ISETUP, [("m", "setf.sig f32 = r34"),
+                                         ("f", "fcvt.xf f33 = f32"),
+                                         ("f", "fnorm.d f33 = f33"),
+                                         ("f", "fcvt.fx.trunc.s1 f33 = f33"),
+                                         ("m", "getf.sig r34 = f33")], 23),
     # FP: Fmac and Fmisc are 4 to either.
     "fma": (FSETUP, [("f", "fma.d f33 = f33, f32, f34")], 4),
     "fmerge": (FSETUP, [("f", "fmerge.s f33 = f33, f33")], 4),
