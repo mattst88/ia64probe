@@ -30,6 +30,7 @@ MODULES = [
     "tests_stmiss",
     "tests_stburst",
     "tests_cbranch",
+    "tests_ctop",
 ]
 
 
