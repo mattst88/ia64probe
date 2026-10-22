@@ -671,6 +671,110 @@ for sz in (1, 8):
                 one("m", "st8 [r38] = r44")],
                 ["mov r37 = r33", "adds r38 = 256, r33",
                  "adds r39 = 512, r33", "mov r45 = 0"] + WARM)
+# How many entries the ALAT holds: N ld8.a to N registers and addresses,
+# then a ld8.c.clr of each in the same order, which misses where a later
+# load replaced its entry and so delays the add of its value in the next
+# group (cap_n); and a window of K live entries, each group adding one and
+# checking the one added K-1 groups before (win_k): can a check free its
+# entry for an advanced load in its own group?  cap_n_gG puts G empty groups
+# between the loads and the checks, in case an entry is written some cycles
+# after its load issues.
+ALAT_ADDRS = [f"adds r{84 + k} = {8 * k}, r33" for k in range(40)]
+for n, g in ([(n, 0) for n in (16, 24, 28, 30, 31, 32, 33, 34, 35, 36, 37,
+                                38, 40)] +
+             [(n, 8) for n in (32, 33, 34, 35, 36)]):
+    BLOCKS[f"alatcap_n{n}" + (f"_g{g}" if g else "")] = (
+        [one("m", f"ld8.a r{44 + k} = [r{84 + k}]") for k in range(n)] +
+        [GAP] * g +
+        [B("mmi", f"ld8.c.clr r{44 + k} = [r{84 + k}]", None,
+           f"add r40 = r40, r{44 + k - 1} ;;" if k else "nop.i 0 ;;")
+         for k in range(n)] +
+        [B("mmi", None, None, f"add r40 = r40, r{44 + n - 1} ;;")],
+        ALAT_ADDRS + WARM)
+    if g:
+        body, setup = BLOCKS[f"alatcap_n{n}_g{g}"]
+        BLOCKS[f"alatcap_n{n}_g{g}_inv"] = (
+            body + [B("mmi", "invala", None, "nop.i 0 ;;")], setup)
+for k in (8, 16, 28, 30, 31, 32, 33, 34):
+    BLOCKS[f"alatwin_k{k}"] = (
+        [B("mmi", f"ld8.a r{44 + j} = [r{84 + j}]",
+           f"ld8.c.clr r{44 + (j + 1) % k} = [r{84 + (j + 1) % k}]",
+           f"add r40 = r40, r{44 + (j - 1) % k} ;;") for j in range(k)]
+        * (2 if k < 16 else 1),
+        ALAT_ADDRS + WARM)
+# The same with the check in M0 ahead of the load in M1: whether the order
+# within a group decides if the load has the entry the check frees.
+for k in (32, 33, 34):
+    BLOCKS[f"alatwin_k{k}_cf"] = (
+        [B("mmi", f"ld8.c.clr r{44 + (j + 1) % k} = [r{84 + (j + 1) % k}]",
+           f"ld8.a r{44 + j} = [r{84 + j}]",
+           f"add r40 = r40, r{44 + (j - 1) % k} ;;") for j in range(k)],
+        ALAT_ADDRS + WARM)
+# Which entry a 33rd advanced load replaces: 32 ld8.a fill the empty ALAT
+# (after invala) in order, a 33rd issues on port M0 or M1, and a check of
+# the first (old) or the 32nd (new) misses where it went.  The manual has
+# pointers for each port that advance with every replacement and only
+# approximate FIFO: an old check that misses every time means the oldest
+# entry, one that misses one time in 32 means a pointer.
+for port in (0, 1):
+    for which, r in [("old", 0), ("new", 31), ("x", 32)] + [
+            (f"e{e}", e) for e in range(1, 31)]:
+        extra = f"ld8.a r76 = [r116]"
+        BLOCKS[f"alatvic_m{port}_{which}"] = (
+            [one("m", f"ld8.a r{44 + k} = [r{84 + k}]") for k in range(32)] +
+            [B("mmi", None if port else extra, extra if port else None,
+               "nop.i 0 ;;")] + [GAP] * 8 +
+            [B("mmi", f"ld8.c.clr r{44 + r} = [r{84 + r}]", None,
+               "nop.i 0 ;;"),
+             B("mmi", "invala", None, f"add r40 = r40, r{44 + r} ;;")],
+            ALAT_ADDRS + WARM)
+# The same with a store that kills the first entry: what a miss costs.
+BLOCKS["alatvic_kill"] = (
+    [one("m", f"ld8.a r{44 + k} = [r{84 + k}]") for k in range(32)] +
+    [one("m", "st8 [r84] = r0")] + [GAP] * 8 +
+    [B("mmi", "ld8.c.clr r44 = [r84]", None, "nop.i 0 ;;"),
+     B("mmi", "invala", None, "add r40 = r40, r44 ;;")],
+    ALAT_ADDRS + WARM)
+# Whether two registers D apart share an ALAT tag: ld8.a of each, then a
+# ld8.c.clr of each, the first of which would clear an entry both match.
+for d in (1, 16, 31, 32, 33, 39):
+    BLOCKS[f"alatalias_d{d}"] = (
+        [one("m", "ld8.a r44 = [r84]"), one("m", f"ld8.a r{44 + d} = [r85]")] +
+        [GAP] * 8 +
+        [one("m", "ld8.c.clr r44 = [r84]"),
+         one("m", f"ld8.c.clr r{44 + d} = [r85]"),
+         B("mmi", None, None, f"add r40 = r40, r{44 + d} ;;")],
+        ALAT_ADDRS + WARM)
+# N ld8.a after invala, a gap, then checks of the entries in ORDER: the
+# first only, the last only, all oldest first, all newest first.
+def alat_checks(regs):
+    return ([B("mmi", f"ld8.c.clr r{44 + r} = [r{84 + r}]", None,
+               "nop.i 0 ;;") for r in regs] +
+            [B("mmi", "invala", None, f"add r40 = r40, r{44 + regs[-1]} ;;")])
+
+
+for n in (33, 34, 35, 36, 40):
+    for order, regs in [("first", [0]), ("last", [n - 1]),
+                        ("fwd", list(range(n))),
+                        ("rev", list(range(n - 1, -1, -1))),
+                        ("pair", [0, n - 1]), ("rpair", [n - 1, 0])] + (
+                        [(f"head{h}", list(range(h)))
+                         for h in (2, 4, 8, 16, 24, 28, 30, 31, 32)] +
+                        [(f"tail{h}", list(range(n - h, n)))
+                         for h in (2, 4, 8, 16, 24, 28, 30, 31, 32)]
+                        if n in (33, 36) else []):
+        BLOCKS[f"alatord_n{n}_{order}"] = (
+            [one("m", f"ld8.a r{44 + k} = [r{84 + k}]") for k in range(n)] +
+            [GAP] * 8 + alat_checks(regs),
+            ALAT_ADDRS + WARM)
+# n33: a check that clears entry A, then a check of entry J.
+for a in (0, 1, 5, 20):
+    for j in range(33):
+        if j != a:
+            BLOCKS[f"alatpair_a{a}_j{j}"] = (
+                [one("m", f"ld8.a r{44 + k} = [r{84 + k}]")
+                 for k in range(33)] + [GAP] * 8 + alat_checks([a, j]),
+                ALAT_ADDRS + WARM)
 # The same copy in a stream: 16 bytes written with two st8, then bytes 0 and
 # 14 copied from OFF bytes behind the write pointer, as zstd's decoder copies
 # a match from output it wrote shortly before; "plain" without the advanced
