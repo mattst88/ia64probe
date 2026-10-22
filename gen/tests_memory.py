@@ -844,6 +844,95 @@ for gaps in (4, 8, 12):
             ["movl r18 = 0x80200", "add r27 = r33, r18",
              "movl r18 = 0x40000", "add r36 = r33, r18",
              "adds r38 = 8, r36", "mov r37 = r13", "mov r41 = 1"])
+# fread's size multiply, setf.sig twice, xmpy.l and getf.sig, after a
+# 16-byte byte copy whose stores still drain (q), after 16 groups of nops
+# (nq), or after the copy with the multiply replaced by nops (qn).
+FXM = [B("mmi", None, "setf.sig f6 = r33", "nop.i 0 ;;"),
+       B("mmi", "setf.sig f7 = r41", None, "nop.i 0"),
+       B("mmi", None, None, "nop.i 0 ;;"),
+       B("mmf", None, None, "xmpy.l f6 = f6, f7 ;;"),
+       B("mmi", None, "getf.sig r44 = f6", "nop.i 0 ;;"),
+       B("mii", "cmp.eq p6, p7 = 0, r44", None, "nop.i 0 ;;")]
+FXN = [GAP] * len(FXM)
+for kind in ("q", "nq", "qn"):
+    copy = ([B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+               "nop.i 0 ;;")] * 16 if kind != "nq" else [GAP] * 16)
+    STORES[f"fxm_{kind}"] = (
+        copy + [B("mmi", None, None, "adds r34 = -16, r34"),
+                B("mmi", None, None, "adds r27 = -16, r27 ;;")]
+        + (FXN if kind == "qn" else FXM) + [GAP] * 8,
+        ["movl r18 = 0x80200", "add r27 = r33, r18", "mov r41 = 16"])
+# fread's lock words: a load of a doubleword stored after the previous
+# iteration's 16-byte byte copy (_dep; _ind loads the next line instead),
+# behind fread's size multiply (s), the same number of nop groups (n), or
+# nothing (z).
+for kind, pre in (("s", FXM), ("n", FXN), ("z", [])):
+    for dep in ("dep", "ind"):
+        STORES[f"fxl_{kind}_{dep}"] = (
+            pre + [B("mmi", None, "ld8 r45 = [r28]" if dep == "dep"
+                     else "ld8 r45 = [r29]", "nop.i 0 ;;")]
+            + [B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+                 "nop.i 0 ;;")] * 16
+            + [B("mmi", None, None, "adds r34 = -16, r34"),
+               B("mmi", None, None, "adds r27 = -16, r27 ;;"),
+               B("mmi", "st8 [r28] = r45", None, "nop.i 0 ;;")]
+            + [GAP] * 8,
+            ["movl r18 = 0x80200", "add r27 = r33, r18", "mov r41 = 16",
+             "adds r28 = 1024, r33", "adds r29 = 1088, r33"])
+# Parts of fread's multiply g groups before a draining byte copy: the
+# whole chain (all), the setfs and xmpy (sx), the setfs alone (s), getf
+# of a register set long before (g), xmpy alone (x).
+FXP = {
+    "all": FXM,
+    "sx": FXM[:4] + [GAP, GAP],
+    "s": FXM[:3] + [GAP, GAP, GAP],
+    "g": [GAP] * 4 + [B("mmi", None, "getf.sig r44 = f8", "nop.i 0 ;;"),
+                      GAP],
+    "x": [GAP] * 3 + [B("mmf", None, None, "xmpy.l f9 = f8, f8 ;;"),
+                      GAP, GAP],
+}
+for part, pre in FXP.items():
+    for g in (0, 1, 2, 4, 8):
+        STORES[f"fxg_{part}_g{g}"] = (
+            pre + [GAP] * g
+            + [B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+                 "nop.i 0 ;;")] * 16
+            + [B("mmi", None, None, "adds r34 = -16, r34"),
+               B("mmi", None, None, "adds r27 = -16, r27 ;;")]
+            + [GAP] * (8 - g),
+            ["movl r18 = 0x80200", "add r27 = r33, r18", "mov r41 = 16",
+             "setf.sig f8 = r41"])
+# fread's multiply (m) or as many nop groups (n) before glibc memcpy's
+# small-size byte loop: two groups a byte, straight (s) or a br.cloop
+# loop (l), with the getf result live (m) or dead (d).
+FXC = {}
+FXD = FXM[:4] + [B("mmi", None, "getf.sig r45 = f6", "nop.i 0 ;;"), GAP]
+for kind, pre, shape, tail in [
+        (k, p, sh, t) for k, p in (("m", FXM), ("d", FXD), ("n", FXN))
+        for sh in ("s", "l") for t in (8, 40, 70)] + [
+        (k, p, "l", t) for k, p in (("m", FXM), ("d", FXD), ("n", FXN))
+        for t in (20, 25, 30, 35, 45, 50, 55, 60)]:
+    if True:
+        if shape == "s":
+            copy = [B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+                      "nop.i 0"),
+                    B("mii", None, "cmp.lt p8, p0 = 1, r43",
+                      "adds r43 = -1, r43 ;;")] * 16
+        else:
+            copy = [B("mii", None, "mov r62 = ar.lc", "nop.i 0 ;;"),
+                    B("mii", None, "mov.i ar.lc = 15", "nop.i 0 ;;"),
+                    B("mmi", "st1 [r34] = r40, 1", "ld1 r40 = [r27], 1",
+                      "nop.i 0", label="1"),
+                    B("mib", None, "cmp.lt p8, p0 = 1, r43",
+                      "br.cloop.sptk.few 1b ;;"),
+                    B("mii", None, "mov.i ar.lc = r62", "nop.i 0 ;;")]
+        FXC[f"fxc_{kind}_{shape}_t{tail}"] = (
+            pre + copy
+            + [B("mmi", None, None, "adds r34 = -16, r34"),
+               B("mmi", None, None, "adds r27 = -16, r27 ;;")]
+            + [GAP] * tail,
+            ["movl r18 = 0x80200", "add r27 = r33, r18", "mov r41 = 16",
+             "mov r43 = 16"])
 # Eight byte stores to one doubleword, then mf to wait for them to leave,
 # then GAPS groups: to the bytes the body before wrote (re) or to the next
 # doubleword (fr).  How long after a byte store leaves does a store to the
@@ -1550,6 +1639,8 @@ def kernels():
     for name, (body, setup) in STORES.items():
         ks += pair(f"st_{name}", "memory", body, SSETUP + setup)
     for name, (body, setup) in BLOCKS.items():
+        ks += pair(f"st_{name}", "memory", body, SSETUP + setup, bodies=2)
+    for name, (body, setup) in FXC.items():
         ks += pair(f"st_{name}", "memory", body, SSETUP + setup, bodies=2)
     # The ld8/st8 pair of one address, and mtfv's walk, as the store setup
     # leaves them, with 8 empty groups after its st8 [r33], and without
