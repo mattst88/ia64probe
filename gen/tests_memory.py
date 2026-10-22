@@ -158,6 +158,84 @@ for bits in (8, 12):
           f"dep r27 = r29, r33, 0, {bits}"),
         B("mmi", "nop.m 0", "nop.m 0", "mov r25 = r28 ;;"),
         B("mmi", "st1 [r26] = r24", "nop.m 0", "nop.i 0 ;;")], MTF_SETUP)
+    # The store a group after the load ("next"), the store of the byte
+    # before ("prev"), and icc's: the store of the byte before, a group
+    # before the next load.
+    STORES[f"mtf_next_{bits}"] = ([
+        B("mmi", "ld1 r28 = [r27]", "nop.m 0", "adds r29 = 1, r27 ;;"),
+        B("mii", "st1 [r27] = r25", "mov r25 = r28",
+          f"dep r27 = r29, r33, 0, {bits} ;;")], MTF_SETUP)
+    STORES[f"mtf_prev_{bits}"] = ([
+        B("mmi", "ld1 r28 = [r27]", "nop.m 0", "adds r29 = 1, r27 ;;"),
+        B("mii", "st1 [r26] = r25", "mov r25 = r28", "mov r26 = r27"),
+        B("mmi", "nop.m 0", "nop.m 0", f"dep r27 = r29, r33, 0, {bits} ;;")],
+        MTF_SETUP + ["mov r26 = r33"])
+    STORES[f"mtf_icc_{bits}"] = ([
+        B("mii", "st1 [r26] = r24", "mov r26 = r27", "adds r29 = 1, r27 ;;"),
+        B("mii", "ld1 r28 = [r27]", "mov r24 = r25",
+          f"dep r27 = r29, r33, 0, {bits} ;;"),
+        B("mmi", "nop.m 0", "nop.m 0", "mov r25 = r28 ;;")],
+        MTF_SETUP + ["mov r26 = r33", "mov r24 = 0"])
+# The load, K empty groups, and the store of the same byte ("d") or the
+# byte before ("p"): how far apart a load and a store to its byte must be.
+for k in range(0, 6):
+    for name, addr, setup in (("d", "r27", []), ("p", "r26", ["mov r26 = r33"])):
+        STORES[f"mtf{name}_k{k}"] = (
+            [B("mmi", "ld1 r28 = [r27]", "nop.m 0", "adds r29 = 1, r27 ;;")]
+            + [GAP] * k
+            + [B("mii", f"st1 [{addr}] = r25", "mov r25 = r28",
+                 "mov r26 = r27"),
+               B("mmi", "nop.m 0", "nop.m 0", "dep r27 = r29, r33, 0, 12 ;;")],
+            MTF_SETUP + setup)
+# A read-modify-write walk (a[i] += 1) of SZ-byte elements: the store of
+# the incremented element ("d"), or of the element before ("p").
+for sz in (1, 4, 8):
+    for name, addr in (("d", "r27"), ("p", "r26")):
+        STORES[f"rmw{name}_{sz}"] = ([
+            B("mmi", f"ld{sz} r28 = [r27]", "nop.m 0",
+              f"adds r29 = {sz}, r27 ;;"),
+            B("mmi", "nop.m 0", "nop.m 0", "adds r25 = 1, r28 ;;"),
+            B("mii", f"st{sz} [{addr}] = r25", "mov r26 = r27",
+              "dep r27 = r29, r33, 0, 12 ;;")], MTF_SETUP + ["mov r26 = r33"])
+# What separates mtfd (12 cycles) from rmwd (4.75): the store's data and
+# where its register is written.
+LD1 = B("mmi", "ld1 r28 = [r27]", "nop.m 0", "adds r29 = 1, r27 ;;")
+STDEP = "dep r27 = r29, r33, 0, 12 ;;"
+MTFX = {
+    "war_out": [LD1, GAP,
+                B("mii", "st1 [r27] = r25", "mov r26 = r27", STDEP),
+                B("mmi", "nop.m 0", "nop.m 0", "mov r25 = r28 ;;")],
+    "cur": [LD1, B("mmi", "nop.m 0", "nop.m 0", "mov r25 = r28 ;;"),
+            B("mii", "st1 [r27] = r25", "mov r26 = r27", STDEP)],
+    "staged": [LD1, B("mii", "nop.m 0", "mov r24 = r25", "mov r25 = r28 ;;"),
+               B("mii", "st1 [r27] = r24", "mov r26 = r27", STDEP)],
+    "const": [LD1, GAP, B("mii", "st1 [r27] = r0", "mov r26 = r27", STDEP)],
+    "const7": [LD1, GAP, B("mii", "st1 [r27] = r23", "mov r26 = r27", STDEP)],
+    "noload": [B("mmi", "nop.m 0", "nop.m 0", "adds r29 = 1, r27 ;;"), GAP,
+               B("mii", "st1 [r27] = r25", "mov r26 = r27", STDEP)],
+}
+MTFX["stg2"] = [
+    B("mii", "ld1 r28 = [r27]", "mov r24 = r25", "adds r29 = 1, r27 ;;"),
+    B("mii", "st1 [r27] = r24", "mov r25 = r28", STDEP)]
+MTFX["stg2b"] = [
+    B("mii", "ld1 r28 = [r27]", "mov r26 = r27", "mov r24 = r25"),
+    B("mmi", "nop.m 0", "nop.m 0", "dep r27 = r29, r33, 0, 12 ;;"),
+    B("mii", "st1 [r26] = r24", "mov r25 = r28", "adds r29 = 1, r27 ;;")]
+MTFX["stg3"] = [
+    B("mii", "ld1 r28 = [r27]", "mov r24 = r25", "adds r29 = 1, r27 ;;"),
+    GAP, B("mii", "st1 [r27] = r24", "mov r25 = r28", STDEP)]
+MTFX["same2"] = [
+    B("mmi", "ld1 r28 = [r27]", "st1 [r27] = r24", "adds r29 = 1, r27 ;;"),
+    B("mii", "mov r24 = r25", "mov r25 = r28", STDEP)]
+MTFX["cmp"] = [LD1, B("mmi", "nop.m 0", "nop.m 0",
+                      "cmp.eq p6, p7 = r23, r28 ;;"),
+               B("mii", "st1 [r27] = r25", "mov r25 = r28", STDEP)]
+MTFX["cmp_same"] = [LD1, B("mii", "st1 [r27] = r25", "mov r25 = r28",
+                           "cmp.eq p6, p7 = r23, r28"),
+                    B("mmi", "nop.m 0", "nop.m 0", STDEP)]
+for name, body in MTFX.items():
+    STORES[f"mtfx_{name}"] = (body, MTF_SETUP + ["mov r24 = 0", "mov r23 = 7",
+                                                 "adds r29 = 1, r33"])
 # Variants of the clang shape: the pointer stepping STRIDE bytes, GAPS empty
 # groups after, and the store SOFF bytes from the load.
 for stride, gaps, soff in ((4, 0, 0), (8, 0, 0), (64, 0, 0), (1, 1, 0),
