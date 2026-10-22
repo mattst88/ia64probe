@@ -38,6 +38,7 @@ MODULES = [
     "tests_dval",
     "tests_lalign",
     "tests_myrand",
+    "tests_argcall",
 ]
 
 
