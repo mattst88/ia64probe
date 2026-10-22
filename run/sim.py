@@ -22,6 +22,9 @@ import tempfile
 HOME = os.path.expanduser("~")
 PERF = os.environ.get("IA64PERF", f"{HOME}/projects/ia64perf")
 QEMU = os.environ.get("QEMU", f"{HOME}/projects/qemu-ia64/build/qemu-ia64")
+# A full ALAT that replaces its oldest entry, as ia64perf's run.sh has:
+# without one, every chk.a runs its recovery code.  $QEMU_CPU overrides it.
+CPU = "itanium2,alat-full=on,alat-fifo=on"
 
 
 def main() -> int:
@@ -44,7 +47,8 @@ def main() -> int:
                   f"out={d}/summary{args.perfargs}")
         res = subprocess.run([QEMU, "-plugin", plugin, args.probe, "-s",
                               "-r", str(args.reps)] + args.prefix,
-                             capture_output=True, text=True, check=True)
+                             capture_output=True, text=True, check=True,
+                             env={"QEMU_CPU": CPU, **os.environ})
         stamps = [int(x) for x in open(log).read().split()]
     calls = [l.split() for l in res.stdout.splitlines()
              if l.startswith("call ")]
