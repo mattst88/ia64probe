@@ -115,6 +115,17 @@ CHAINS = {
     "fcmp_qp": (FSETUP, [("f", "(p6) fcmp.eq p6, p7 = f32, f32")], 2),
     "cmp_add_qp": (ISETUP, [("a", "(p6) cmp.eq p6, p7 = r34, r34"),
                             ("a", "(p6) add r34 = r34, r40")], 2),
+    # An instruction whose qualifying predicate is false (p7): does it wait
+    # for its sources, and does a later reader wait for its write?
+    "fma_off": (FSETUP, [("f", "(p7) fma.d f33 = f33, f32, f34")], None),
+    "fma_off_src": (FSETUP, [("f", "fma.d f33 = f33, f32, f34"),
+                             ("f", "(p7) fma.d f35 = f33, f32, f34")], None),
+    "fma_off_dst": (FSETUP, [("f", "fma.d f33 = f33, f32, f34"),
+                             ("f", "(p7) fma.d f33 = f35, f32, f34")], None),
+    "add_off_ld": (LSETUP, [("m", "ld8 r34 = [r34]"),
+                            ("a", "(p7) add r35 = r34, r40")], None),
+    "ld_off_add": (LSETUP, [("m", "ld8 r34 = [r34]"),
+                            ("a", "(p7) add r34 = r35, r40")], None),
     # Moves to and from the special registers: measured only.
     "mov_ec": (ISETUP, [("i", "mov.i ar.ec = r34"),
                         ("i", "mov.i r34 = ar.ec")], None),
