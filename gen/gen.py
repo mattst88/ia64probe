@@ -37,6 +37,7 @@ MODULES = [
     "tests_lpk",
     "tests_dval",
     "tests_lalign",
+    "tests_myrand",
 ]
 
 
