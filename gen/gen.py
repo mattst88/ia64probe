@@ -41,6 +41,7 @@ MODULES = [
     "tests_argcall",
     "tests_cellinfo",
     "tests_lfetch",
+    "tests_fdiv",
 ]
 
 

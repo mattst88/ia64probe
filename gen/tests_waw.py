@@ -29,6 +29,11 @@ BODIES = {
     "setf_fma": [SETF, FMA], "popcnt_add": [POPCNT, ADD],
     "movbr_add": [MOVBR, ADD],
     "ld8_ld8": [LD, ("m", "ld8 r50 = [r33]")],
+    # An F-unit or load write in flight, then an M-unit write: the
+    # update in tramp3d's APressure rewrites each xma.l or ldfd target
+    # with a setf a few groups on.
+    "fma_setf": [FMA, SETF], "fma_ldf8": [FMA, LDF], "ldf8_setf": [LDF, SETF],
+    "xma_setf": [("f", "xma.l f50 = f32, f32, f0"), SETF],
 }
 
 
