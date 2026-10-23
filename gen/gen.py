@@ -40,6 +40,7 @@ MODULES = [
     "tests_myrand",
     "tests_argcall",
     "tests_cellinfo",
+    "tests_lfetch",
 ]
 
 
