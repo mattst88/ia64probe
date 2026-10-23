@@ -666,6 +666,81 @@ for n in (4, 16):
                 "mov r60 = r34", "movl r19 = 0x100000",
                 "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
 
+# The 16-byte copy to the same 16 bytes each time, then G groups, then a
+# load of bytes it stored and a use: aes's decrypt reading what fread's
+# memcpy just wrote.
+for ld, sz in (("ld1", 1), ("ld4", 4), ("ld8", 8)):
+    for off in (0, 8):
+        for g in (0, 2, 4, 8, 16, 24, 32, 48):
+            BLOCKS[f"mld_{ld}_o{off}_g{g}"] = (
+                mcpy(16, 0) +
+                [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                 for _ in range(g)] +
+                [B("mii", f"ld{sz} r24 = [r63]", "nop.i 0", "nop.i 0 ;;"),
+                 B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+                [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                 for _ in range(120)], [
+                    "mov r60 = r34", f"movl r19 = {0x100840}",
+                    "add r61 = r34, r19", f"adds r63 = {off}, r61",
+                    "mov r40 = 1", "mov r41 = 0"])
+
+# The same, with a store in the load's group: to a word in another line
+# (x64), the next 16 bytes (x16) or a byte the copy wrote (x0) -- or, "sep",
+# in the group before the load.  The stub after aes's memcpy does this.
+for sto in ("x64", "x16", "x0", "sep64"):
+    for g in (0, 4, 8, 16, 32):
+        so = int(sto.lstrip("xsep"))
+        ldg = ([B("mii", "st4 [r64] = r40", "nop.i 0", "nop.i 0 ;;"),
+                B("mii", "ld4 r24 = [r63]", "nop.i 0", "nop.i 0 ;;")]
+               if sto.startswith("sep") else
+               [B("mmi", "st4 [r64] = r40", "ld4 r24 = [r63]", "nop.i 0 ;;")])
+        BLOCKS[f"mldst_{sto}_g{g}"] = (
+            mcpy(16, 0) +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(g)] + ldg +
+            [B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(120)], [
+                "mov r60 = r34", f"movl r19 = {0x100840}",
+                "add r61 = r34, r19", "adds r63 = 4, r61",
+                f"adds r64 = {so}, r61", "mov r40 = 1", "mov r41 = 0"])
+
+# Which store queue state that makes it slow: n bytes copied, then st4 and
+# ld4 in one group at offsets (st, ld) from the copy's start ("nc": no
+# copy, the queue empty).
+MLQ = {"ss": (16, 4), "oo": (144, 132), "so": (16, 132), "os": (144, 4),
+       "s128": (80, 4), "b": (256, 260)}
+for n in (0, 4, 8, 16, 32):
+    for k, (so, lo) in MLQ.items():
+        BLOCKS[f"mlq_n{n}_{k}"] = (
+            (mcpy(n, 0) if n else []) +
+            [B("mmi", "st4 [r64] = r40", "ld4 r24 = [r63]", "nop.i 0 ;;"),
+             B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(120)], [
+                "mov r60 = r34", f"movl r19 = {0x100800}",
+                "add r61 = r34, r19", f"adds r63 = {lo}, r61",
+                f"adds r64 = {so}, r61", "mov r40 = 1", "mov r41 = 0"])
+
+# The pair's order, chunk and store size: (store, load offsets, store op,
+# load first?).
+MLR = {"sl": (144, 132, "st4", False), "ls": (144, 132, "st4", True),
+       "chunk": (144, 148, "st4", False), "st1": (144, 132, "st1", False),
+       "st8": (144, 136, "st8", False), "lsch": (144, 148, "st4", True),
+       "far": (176, 132, "st4", False)}
+for n in (0, 16):
+    for k, (so, lo, sop, lf) in MLR.items():
+        st, ld = f"{sop} [r64] = r40", "ld4 r24 = [r63]"
+        BLOCKS[f"mlr_n{n}_{k}"] = (
+            (mcpy(n, 0) if n else []) +
+            [B("mmi", ld if lf else st, st if lf else ld, "nop.i 0 ;;"),
+             B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(120)], [
+                "mov r60 = r34", f"movl r19 = {0x100800}",
+                "add r61 = r34, r19", f"adds r63 = {lo}, r61",
+                f"adds r64 = {so}, r61", "mov r40 = 1", "mov r41 = 0"])
+
 # The 16-byte copy with its destination o bytes past the source's 1 MB
 # mirror, to see whether the loads and stores alias in the bits compared.
 for o in (8, 16, 64, 1024, 2048, 4096, 0x840, 0x2040):
@@ -697,6 +772,73 @@ for v, ld in (("s", "nop.m 0"), ("f", "(p6) ld1 r23 = [r60]")):
                             for _ in range(200)], [
                 "mov r60 = r34", f"movl r19 = {0x100840}",
                 "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+# What makes the queue behind mlq slow: n st1s a group apart to
+# consecutive bytes without a loop (u), each with an ld1 from another line
+# in its group (ul), or all to one byte (b); the copy loop with its loads
+# made nops (v); then mlq's ss pair.
+def mqs(kind, n):
+    pre = [B("mii", None, "mov r66 = r61", "mov r67 = r60 ;;")]
+    if kind == "v":
+        return pre + mcpyv(n, "nop.m 0", 0)[:4] + [
+            B("mmi", "mov r61 = r66", "mov r60 = r67",
+              "mov.i ar.lc = r62 ;;")]
+    st = {"u": "st1 [r66] = r40, 1", "ul": "st1 [r66] = r40, 1",
+          "b": "st1 [r66] = r40"}[kind]
+    ld = "ld1 r23 = [r67], 1" if kind == "ul" else None
+    return pre + [B("mmi", st, ld, "nop.i 0 ;;") for _ in range(n)]
+for kind in ("u", "ul", "b", "v"):
+    for n in (4, 8, 16):
+        BLOCKS[f"mqs_{kind}_n{n}"] = (
+            mqs(kind, n) +
+            [B("mmi", "st4 [r64] = r40", "ld4 r24 = [r63]", "nop.i 0 ;;"),
+             B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(120)], [
+                "mov r60 = r34", f"movl r19 = {0x100800}",
+                "add r61 = r34, r19", "adds r63 = 4, r61",
+                "adds r64 = 16, r61", "mov r40 = 1", "mov r41 = 0"])
+        BLOCKS[f"mqs_{kind}_n{n}_x"] = (
+            mqs(kind, n) +
+            [B("mmi", "st4 [r64] = r40", None, "nop.i 0 ;;"),
+             B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(120)], [
+                "mov r60 = r34", f"movl r19 = {0x100800}",
+                "add r61 = r34, r19", "adds r63 = 4, r61",
+                "adds r64 = 16, r61", "mov r40 = 1", "mov r41 = 0"])
+
+# The store in the load's group: st1 to the run's next byte (c), st1 to
+# offset 16 (s1), or st4 to the run's next byte (c4); the load ld4 or ld1
+# of offset 40, unwritten (as cig_*x).
+MQG = {"c": "st1 [r66] = r40", "s1": "st1 [r64] = r40",
+       "c4": "st4 [r66] = r40"}
+for g, st in MQG.items():
+    for ld in ("ld4", "ld1"):
+        for n in (4, 8, 16):
+            BLOCKS[f"mqg_{g}_{ld}_n{n}"] = (
+                mqs("u", n) +
+                [B("mmi", st, f"{ld} r24 = [r63]", "nop.i 0 ;;"),
+                 B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+                [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                 for _ in range(120)], [
+                    "mov r60 = r34", f"movl r19 = {0x100800}",
+                    "add r61 = r34, r19", "adds r63 = 40, r61",
+                    "adds r64 = 16, r61", "mov r40 = 1", "mov r41 = 0"])
+
+# The ld4's offset against the n bytes queued (mqs_u): in them (0, 4,
+# 8, 12) or not (20, 40, 60); the group's st4 at offset 16.
+for off in (0, 4, 8, 12, 20, 40, 60):
+    for n in (2, 4, 8, 12, 16):
+        BLOCKS[f"mqo_o{off}_n{n}"] = (
+            mqs("u", n) +
+            [B("mmi", "st4 [r64] = r40", "ld4 r24 = [r63]", "nop.i 0 ;;"),
+             B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(120)], [
+                "mov r60 = r34", f"movl r19 = {0x100800}",
+                "add r61 = r34, r19", f"adds r63 = {off}, r61",
+                "adds r64 = 16, r61", "mov r40 = 1", "mov r41 = 0"])
+
 for n in range(1, 33):
     BLOCKS[f"mcpya_n{n}_gap200"] = (
         mcpyv(n, "nop.m 0", 64) +
