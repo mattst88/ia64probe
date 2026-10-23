@@ -42,6 +42,9 @@ MODULES = [
     "tests_cellinfo",
     "tests_lfetch",
     "tests_fdiv",
+    "tests_bcorr",
+    "tests_bresteer",
+    "tests_lfind",
 ]
 
 
