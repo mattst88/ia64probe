@@ -852,6 +852,28 @@ for k in ("sf", "ldf", "xm"):
                 "add r61 = r34, r19", "adds r63 = 512, r61",
                 "mov r40 = 1", "mov r41 = 0", "mov r42 = 0"])
 
+# 16 st1s, then k st8s to another line, then setf or an FP load: fread's
+# memcpy and the stores after it ahead of fwrite's size multiply.
+for k in ("sf", "ldf"):
+    for g in (0, 16, 40):
+        for m in (0, 1, 3):
+            BLOCKS[f"msw_{k}_g{g}_k{m}"] = (
+                [B("mii", None, "mov r66 = r61", "nop.i 0 ;;")] +
+                [B("mmi", "st1 [r66] = r40, 1", None, "nop.i 0 ;;")
+                 for _ in range(16)] +
+                [B("mii", None, "add r42 = r42, r40", "nop.i 0 ;;")
+                 for _ in range(g)] +
+                [B("mmi", "st8 [r60] = r40, 8", None, "nop.i 0 ;;")
+                 for _ in range(m)] +
+                MSF[k] +
+                [B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+                [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                 for _ in range(150 - g)], [
+                    "mov r60 = r34", f"movl r19 = {0x100800}",
+                    "add r61 = r34, r19", "adds r63 = 512, r61",
+                    "adds r60 = 1024, r61",
+                    "mov r40 = 1", "mov r41 = 0", "mov r42 = 0"])
+
 # What makes the queue behind mlq slow: n st1s a group apart to
 # consecutive bytes without a loop (u), each with an ld1 from another line
 # in its group (ul), or all to one byte (b); the copy loop with its loads
