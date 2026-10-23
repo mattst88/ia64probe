@@ -10,7 +10,10 @@ penalty a body takes 11 + dist groups.
 
 On a 9340 a body costs 6 cycles more whenever dist (in bundles) is 9 or
 less, and nothing from 10 on, whatever K, the order or the hint; the w*
-bodies, with two-bundle groups, show that bundles count, not cycles.
+bodies, with two-bundle groups, show that bundles count, not cycles.  The ibv and ibs probes
+show the penalty is for a target that differs from the last one taken
+through the same register, by any branch: two call sites through b6,
+each always to its own target, cost as much as one alternating.
 """
 
 from __future__ import annotations
@@ -92,6 +95,15 @@ def vbody(dist, alt):
     return out
 
 
+def sbody(second):
+    out = []
+    for r in ("r24", second):
+        out += [B("mib", None, f"mov b6 = {r}", "nop.b 0 ;;"),
+                B("mib", None, None, "br.call.sptk.many b7 = b6 ;;"),
+                NOP, NOP]
+    return out
+
+
 def kernels():
     ks = []
     for k, order in ((1, "seq"), (2, "seq"), (2, "rnd"), (4, "seq"),
@@ -141,6 +153,12 @@ def kernels():
             ks += pair(f"ibv_{'alt' if alt else 'same'}_d{dist}", "branch",
                        vbody(dist, alt), VSETUP, bodies=4,
                        teardown=VTEARDOWN)
+    # Two call sites through b6, each with its own fixed target ("xy"),
+    # or both to the same one ("xx"): is "same target" judged per
+    # register or per branch?
+    for name, second in (("xx", "r24"), ("xy", "r25")):
+        ks += pair(f"ibs_{name}_d0", "branch", sbody(second), VSETUP,
+                   bodies=4, teardown=VTEARDOWN)
     for dist in (0, 8):
         b, base = body(1, dist, "sptk", direct=True)
         ks += pair(f"ib_direct_d{dist}", "branch", b,
