@@ -13,7 +13,10 @@ less, and nothing from 10 on, whatever K, the order or the hint; the w*
 bodies, with two-bundle groups, show that bundles count, not cycles.  The ibv and ibs probes
 show the penalty is for a target that differs from the last one taken
 through the same register, by any branch: two call sites through b6,
-each always to its own target, cost as much as one alternating.
+each always to its own target, cost as much as one alternating.  Naming
+the branch does not help either: mov.sptk, mov.sptk.imp and mov.dptk to
+b6 with the branch as tag cost what a plain mov does, and a brp.sptk
+(.imp) of b6 in its own group only adds that group.
 """
 
 from __future__ import annotations
@@ -31,20 +34,25 @@ NOP2 = [B("mii", None, None, "nop.i 0"), B("mii", None, None, "nop.i 0 ;;")]
 
 
 def body(k, dist, hint, direct=False, wide=False, same=False, call=False,
-         many=False):
+         many=False, movhint=None, brp=None):
     pre = [B("mmi", "ld8 r20 = [r21]", None, "adds r22 = 8, r22 ;;"),
            B("mmi", None, None, "and r22 = r19, r22 ;;"),
            B("mmi", None, None, "add r21 = r18, r22 ;;"),
            B("mii", None, "mov r23 = ip", "nop.i 0 ;;"),
            B("mmi", None, None, "add r20 = r20, r23 ;;")]
     if not same:
-        pre.append(B("mii", None, "mov b6 = r20", "nop.i 0 ;;"))
+        mov = (f"mov.{movhint} b6 = r20, 20002f" if movhint
+               else "mov b6 = r20")
+        pre.append(B("mii", None, mov, "nop.i 0 ;;"))
+    if brp:
+        pre.append(B("mib", None, None, f"brp.{brp} b6, 20002f ;;"))
     pre += (NOP2 if wide else [NOP]) * dist
     wh = "many" if many else "few"
     br = (f"br.call.{hint}.{wh} b7 = b6 ;;" if call
           else f"br.{hint}.{wh} b6 ;;")
     pre.append(B("mib", None, "mov b6 = r20" if same else None,
-                 "br.sptk.few 20001f ;;" if direct else br))
+                 "br.sptk.few 20001f ;;" if direct else br,
+                 label="20002" if movhint or brp else None))
     if call:
         pre.append(B("mib", None, None, "br.sptk.few 20000f ;;"))
     ip_at = 3
@@ -159,6 +167,17 @@ def kernels():
     for name, second in (("xx", "r24"), ("xy", "r25")):
         ks += pair(f"ibs_{name}_d0", "branch", sbody(second), VSETUP,
                    bodies=4, teardown=VTEARDOWN)
+    # The hinted move to b6, and brp, which name the branch: does either
+    # tell the front end the new target in time?
+    for name, kw in (("movsptk", dict(movhint="sptk")),
+                     ("movimp", dict(movhint="sptk.imp")),
+                     ("movdptk", dict(movhint="dptk")),
+                     ("brp", dict(brp="sptk")),
+                     ("brpimp", dict(brp="sptk.imp"))):
+        for dist in (0, 3, 6):
+            b, base = body(4, dist, "sptk", **kw)
+            ks += pair(f"ib_{name}_k4_rnd_d{dist}", "branch", b,
+                       setup(table(4, "rnd", base)), bodies=4)
     for dist in (0, 8):
         b, base = body(1, dist, "sptk", direct=True)
         ks += pair(f"ib_direct_d{dist}", "branch", b,
