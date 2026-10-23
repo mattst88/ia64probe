@@ -25,6 +25,33 @@ to a stream of its own.
 
 fsg_{x}: a group of stores and FP loads at the offsets FSG gives.
 fsgi{n}_{x}: the same, each group followed by n empty ones.
+
+frb_{v}_x{x}: fdtd-2d's ex update with hz[j - 1] taken from the iteration
+before, as clang pipelines it at II 2: a group of an stfd, then a group of
+two ldfd x bytes apart (ex[j] and hz[j], 81920 bytes apart in polybench's
+layout), every pointer stepping 8.  v: base as above; split, one load moved
+to the store's group; nost, no store; one, the second load a nop; u{R},
+base with an fms in the store's group of the two loads R copies (2R
+cycles) back, as the loop subtracts them; a{R}/b{R}, the fms of only the
+first/second load R copies back (the other operand f9); a{R}s, a{R} with
+the two loads in one bundle instead of two.
+
+frh_{st}_d{d}: fdtd-2d's hz update with ex[j] taken from the iteration
+before, as clang pipelines it at II 3: a group of an stfd to hz[j - 7] and
+ldfd of ey[i][j] and hz[j], an empty group, and a group of ldfd of ex[j +
+1] and ey[i + 1][j], at polybench's offsets (each array 0xa000 bytes after
+the last, a row 640 bytes), every pointer stepping 8.  st: 1, the store as
+above; 2, in the empty group; 3, in the last group; n, none.  d: bytes
+added to the hz load's address.  _c{k...}: an fms of load k (0 ex, 1
+ey, 2 ey[i + 1], 3 hz) as many cycles after it as the loop's: 6, 13, 10
+and 17.
+
+frq_x{x}_{cb}_g{g}_c{k}: does a bank conflict delay a later load to the
+bank?  Copies of eight cycles: at cycle 0, ldfd A and B x bytes apart; at
+cycle g, ldfd C, 0x28000 bytes from A (cb s, A's bank) or 0x28040 (d,
+another bank); an fms of load k (a, b or c) 6 cycles after it.
+frq_{o}_g{g}_c{k}: frq_x81920_d, and at cycle g also ldfd D, 0x3c0a0
+bytes from A, after C (o cd) or before it (dc); k may be d.
 """
 
 from emit import Bundle as B
@@ -179,6 +206,85 @@ for L, lo in (("u", [4352, 4416]), ("v", [6144, 6208]), ("w", [6144])):
         FSG[f"t{L}_{d}"] = ([0, d], lo)
 
 
+def frb(v, copies=12):
+    """frb: copies of an stfd group and a group of two ldfd (see above)."""
+    out = []
+    for c in range(copies):
+        st = None if v == "nost" else "stfd [r66] = f9, 8"
+        a = f"ldfd f{32 + 2 * c} = [r60], 8"
+        b = None if v == "one" else f"ldfd f{33 + 2 * c} = [r61], 8"
+        f = "nop.f 0"
+        if v[0] in "uab" and v[1].isdigit():
+            p = (c - int(v[1:].rstrip("s"))) % copies
+            x, y = f"f{32 + 2 * p}", f"f{33 + 2 * p}"
+            x, y = {"u": (x, y), "a": (x, "f9"), "b": ("f9", y)}[v[0]]
+            f = f"fms.d f{64 + c} = {x}, f1, {y}"
+        if v == "split":
+            out += [B("mmi", st, a, "nop.i 0 ;;"), B("mmi", b, None, "nop.i 0 ;;")]
+        else:
+            out += [B("mmf", st, None, f + " ;;")]
+            if v[0] in "ab" and v[1].isdigit() and not v.endswith("s"):
+                out += [B("mfi", a, "nop.f 0", "nop.i 0"),
+                        B("mfi", b, "nop.f 0", "nop.i 0 ;;")]
+            else:
+                out += [B("mmi", a, b, "nop.i 0 ;;")]
+    return out
+
+
+def frh(st, cons="", copies=12):
+    """frh: copies of fdtd-2d's hz loop's three groups (see above)."""
+    out = []
+
+    def use(k, c, back):
+        # An fms of load k (0 ex, 1 ey, 2 ey1, 3 hz) of the copy back copies
+        # before, or a nop if cons doesn't name it.
+        if str(k) not in cons:
+            return "nop.f 0"
+        return (f"fms.d f{80 + 4 * c + k} = "
+                f"f{32 + 4 * ((c - back) % copies) + (2, 0, 3, 1)[k]}, f1, f9")
+    for c in range(copies):
+        t = 32 + 4 * c
+        s = "stfd [r66] = f9, 8"
+        out += [B("mmf", s if st == "1" else None, f"ldfd f{t} = [r61], 8",
+                  use(2, c, 4)),
+                B("mmi", f"ldfd f{t + 1} = [r62], 8", None, "nop.i 0 ;;"),
+                B("mfi", s if st == "2" else None, use(1, c, 4),
+                  "nop.i 0 ;;"),
+                B("mmf", f"ldfd f{t + 2} = [r60], 8",
+                  f"ldfd f{t + 3} = [r63], 8", use(0, c, 2)),
+                B("mfi", s if st == "3" else None, use(3, c, 5),
+                  "nop.i 0 ;;")]
+    return out
+
+
+FRH = [("1", 0, ""), ("2", 0, ""), ("3", 0, ""), ("n", 0, ""),
+       ("1", 8, ""), ("1", 16, ""), ("1", 64, ""), ("1", 128, ""),
+       ("n", 128, "")]
+FRH += [(st, d, c) for st in "1n" for d in (0, 128)
+        for c in ("0", "1", "2", "3", "0123")]
+
+
+def frq(g, k, copies=12, length=8, two=""):
+    """frq: copies of loads A and B at cycle 0, C at g (see above)."""
+    cyc = [[[], []] for _ in range(copies * length)]
+    for c in range(copies):
+        t, at = 32 + 4 * c, c * length
+        cyc[at][0] += [f"ldfd f{t} = [r60], 8", f"ldfd f{t + 1} = [r61], 8"]
+        cd = [f"ldfd f{t + 2} = [r62], 8", f"ldfd f{t + 3} = [r63], 8"]
+        cyc[at + g][0] += {"": cd[:1], "cd": cd, "dc": cd[::-1]}[two]
+        u = "abcd".index(k)
+        cyc[(at + (g if k in "cd" else 0) + 6) % len(cyc)][1] += [
+            f"fms.d f{80 + c} = f{t + u}, f1, f9"]
+    out = []
+    for m, f in cyc:
+        m += [None] * (2 - len(m))
+        out += [B("mmf", m[0], m[1], (f[0] if f else "nop.f 0") + " ;;")]
+    return out
+
+
+FRB = [0x14000, 0x14008, 0x14010, 0x14020, 0x14080, 8, 16]
+
+
 FPI = ["0000", "1000", "1100", "0011", "1010", "1110", "1111"]
 
 
@@ -228,6 +334,51 @@ def kernels():
                        [f"adds r{66 + k} = {x}, r59" for k, x in enumerate(S)] +
                        ["movl r18 = 0x3fe0000000000000", "setf.d f9 = r18"],
                        {"S": S, "L": L, "idle": idle}, bodies=2, iters=60)
+    for x in FRB:
+        for v in ("base", "split", "nost", "one", "u3", "u4", "u5", "u6",
+                  "u7", "a3", "a4", "b3", "b4", "a3s", "b3s"):
+            if (v == "one" or v[1].isdigit()) and x not in (FRB[0], 16):
+                continue
+            ks += pair(f"frb_{v}_x{x}", "fdtdk", frb(v),
+                       ["movl r18 = 0x100000", "add r60 = r33, r18",
+                        f"movl r18 = {x}", "add r61 = r60, r18",
+                        "adds r66 = -80, r60",
+                        "movl r18 = 0x3fe0000000000000", "setf.d f9 = r18"],
+                       {"v": v, "x": x}, bodies=2, iters=60)
+    for st, d, cons in FRH:
+        ks += pair(f"frh_{st}_d{d}" + (f"_c{cons}" if cons else ""),
+                   "fdtdk", frh(st, cons),
+                   ["movl r18 = 0x100000", "add r59 = r33, r18",
+                    "adds r60 = 0x278, r59", "movl r18 = 0xa270",
+                    "add r61 = r59, r18", "adds r63 = 0x280, r61",
+                    f"movl r18 = {0x14270 + d}", "add r62 = r59, r18",
+                    "movl r18 = 0x14238", "add r66 = r59, r18",
+                    "movl r18 = 0x3fe0000000000000", "setf.d f9 = r18"],
+                   {"st": st, "d": d, "cons": cons}, bodies=2, iters=60)
+    for x in (0x14000, 16):
+        for cb, y in (("s", 0x28000), ("d", 0x28040)):
+            for g in (1, 2, 3, 4, 5):
+                for k in "abc":
+                    ks += pair(f"frq_x{x}_{cb}_g{g}_c{k}", "fdtdk", frq(g, k),
+                               ["movl r18 = 0x100000", "add r60 = r33, r18",
+                                f"movl r18 = {x}", "add r61 = r60, r18",
+                                f"movl r18 = {y}", "add r62 = r60, r18",
+                                "movl r18 = 0x3fe0000000000000",
+                                "setf.d f9 = r18"],
+                               {"x": x, "cb": cb, "g": g, "k": k},
+                               bodies=2, iters=60)
+    for two in ("cd", "dc"):
+        for g in (2, 1, 3):
+            for k in "cd":
+                ks += pair(f"frq_{two}_g{g}_c{k}", "fdtdk",
+                           frq(g, k, two=two),
+                           ["movl r18 = 0x100000", "add r60 = r33, r18",
+                            "movl r18 = 0x14000", "add r61 = r60, r18",
+                            "movl r18 = 0x28040", "add r62 = r60, r18",
+                            "movl r18 = 0x3c0a0", "add r63 = r60, r18",
+                            "movl r18 = 0x3fe0000000000000",
+                            "setf.d f9 = r18"],
+                           {"two": two, "g": g, "k": k}, bodies=2, iters=60)
     for incs in FPI:
         ks += pair(f"fpi_{incs}", "fdtdk", fpi(incs),
                    ["movl r18 = 0x100000", "add r60 = r33, r18",
