@@ -772,6 +772,86 @@ for v, ld in (("s", "nop.m 0"), ("f", "(p6) ld1 r23 = [r60]")):
                             for _ in range(200)], [
                 "mov r60 = r34", f"movl r19 = {0x100840}",
                 "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+# What else waits behind n queued st1s (one a group, consecutive bytes):
+# setf then getf (sf), setf/xmpy/getf as fwrite's size multiply (xm), an
+# FP load (ldf) or an integer load (ld) from another line, or getf alone
+# (gf).  n0 is the empty queue.
+MSF = {"sf": [B("mmi", "setf.sig f7 = r40", None, "nop.i 0 ;;"),
+              B("mmi", "getf.sig r24 = f7", None, "nop.i 0 ;;")],
+       "xm": [B("mmi", "setf.sig f7 = r40", "setf.sig f8 = r40",
+                "nop.i 0 ;;"),
+              B("mmf", None, None, "xmpy.l f7 = f7, f8 ;;"),
+              B("mmi", "getf.sig r24 = f7", None, "nop.i 0 ;;")],
+       "ldf": [B("mmi", "ldf8 f7 = [r63]", None, "nop.i 0 ;;"),
+               B("mmi", "getf.sig r24 = f7", None, "nop.i 0 ;;")],
+       "ld": [B("mmi", "ld8 r24 = [r63]", None, "nop.i 0 ;;")],
+       "gf": [B("mmi", "getf.sig r24 = f9", None, "nop.i 0 ;;")]}
+for k, seq in MSF.items():
+    for n in (0, 4, 8, 16):
+        BLOCKS[f"msf_{k}_n{n}"] = (
+            [B("mii", None, "mov r66 = r61", "nop.i 0 ;;")] +
+            [B("mmi", "st1 [r66] = r40, 1", None, "nop.i 0 ;;")
+             for _ in range(n)] + seq +
+            [B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(150)], [
+                "mov r60 = r34", f"movl r19 = {0x100800}",
+                "add r61 = r34, r19", "adds r63 = 512, r61",
+                "mov r40 = 1", "mov r41 = 0", "setf.sig f9 = r40"])
+# The same after n stores of each kind: consecutive bytes (b), doublewords
+# (d) or one byte (s).
+MSQ = {"b": "st1 [r66] = r40, 1", "d": "st8 [r66] = r40, 8",
+       "s": "st1 [r66] = r40"}
+for kind, st in MSQ.items():
+    for k in ("sf", "ldf"):
+        for n in (6, 8, 10, 11, 12, 13, 14, 16, 20, 24, 32):
+            BLOCKS[f"msq_{kind}_{k}_n{n}"] = (
+                [B("mii", None, "mov r66 = r61", "nop.i 0 ;;")] +
+                [B("mmi", st, None, "nop.i 0 ;;") for _ in range(n)] +
+                MSF[k] +
+                [B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+                [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                 for _ in range(150)], [
+                    "mov r60 = r34", f"movl r19 = {0x100800}",
+                    "add r61 = r34, r19", "adds r63 = 512, r61",
+                    "mov r40 = 1", "mov r41 = 0"])
+
+# setf at every n from 12 to 22, and an FP load behind st2s and st4s.
+for kind, st, ks, ns in (("b", "st1 [r66] = r40, 1", ("sf",), range(12, 23)),
+                         ("h", "st2 [r66] = r40, 2", ("ldf", "sf"),
+                          (4, 8, 12, 16)),
+                         ("w", "st4 [r66] = r40, 4", ("ldf", "sf"),
+                          (4, 8, 12, 16))):
+    for k in ks:
+        for n in ns:
+            BLOCKS[f"msr_{kind}_{k}_n{n}"] = (
+                [B("mii", None, "mov r66 = r61", "nop.i 0 ;;")] +
+                [B("mmi", st, None, "nop.i 0 ;;") for _ in range(n)] +
+                MSF[k] +
+                [B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+                [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                 for _ in range(150)], [
+                    "mov r60 = r34", f"movl r19 = {0x100800}",
+                    "add r61 = r34, r19", "adds r63 = 512, r61",
+                    "mov r40 = 1", "mov r41 = 0"])
+
+# 16 st1s to consecutive bytes, g empty groups, then setf or an FP load.
+for k in ("sf", "ldf", "xm"):
+    for g in (0, 4, 8, 16, 24, 32, 40, 48, 64):
+        BLOCKS[f"msg_{k}_g{g}"] = (
+            [B("mii", None, "mov r66 = r61", "nop.i 0 ;;")] +
+            [B("mmi", "st1 [r66] = r40, 1", None, "nop.i 0 ;;")
+             for _ in range(16)] +
+            [B("mii", None, "add r42 = r42, r40", "nop.i 0 ;;")
+             for _ in range(g)] +
+            MSF[k] +
+            [B("mii", None, "add r41 = r41, r24", "nop.i 0 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(150 - g)], [
+                "mov r60 = r34", f"movl r19 = {0x100800}",
+                "add r61 = r34, r19", "adds r63 = 512, r61",
+                "mov r40 = 1", "mov r41 = 0", "mov r42 = 0"])
+
 # What makes the queue behind mlq slow: n st1s a group apart to
 # consecutive bytes without a loop (u), each with an ld1 from another line
 # in its group (ul), or all to one byte (b); the copy loop with its loads
@@ -915,6 +995,11 @@ for k in range(4):
         for n in (2, 3, 4, 6, 8, 12, 16, 24, 32):
             BLOCKS[f"lal{k}_b{nb}_n{n}"] = (lal(k, nb, n), [
                 "mov r40 = 1", "mov r41 = 0"])
+# Every trip count to 16, to see where short .dptk loops change regime.
+for nb in (1, 2):
+    for n in range(1, 17):
+        BLOCKS[f"lan_b{nb}_n{n}"] = (lal(0, nb, n), [
+            "mov r40 = 1", "mov r41 = 0"])
 for ec in ("nop", "rd", 0, 1, 2):
     for n in (4, 8, 12, 16):
         BLOCKS[f"lsx{ec}_n{n}"] = (
