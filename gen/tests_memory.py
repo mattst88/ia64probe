@@ -656,6 +656,150 @@ for n in (1, 4, 8, 16, 32, 64):
             "mov r60 = r34", "movl r19 = 0x100000",
             "add r61 = r34, r19"])
 
+# The same copy behind G groups of a one-cycle add chain, as aes's fwrite
+# copies each 16 bytes decrypt wrote with the store queue long drained.
+for n in (4, 16):
+    for g in (24, 64, 160):
+        BLOCKS[f"mcpy_n{n}_gap{g}"] = (
+            mcpy(n, n) + [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                          for _ in range(g)], [
+                "mov r60 = r34", "movl r19 = 0x100000",
+                "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+
+# The 16-byte copy with its destination o bytes past the source's 1 MB
+# mirror, to see whether the loads and stores alias in the bits compared.
+for o in (8, 16, 64, 1024, 2048, 4096, 0x840, 0x2040):
+    BLOCKS[f"mcpy_n16_o{o:x}"] = (mcpy(16, 16), [
+        "mov r60 = r34", f"movl r19 = {0x100000 + o}",
+        "add r61 = r34, r19"])
+for n in (1, 2, 3, 4, 6, 8, 10, 12, 14, 20, 24, 32):
+    BLOCKS[f"mcpy_n{n}_o840_gap200"] = (
+        mcpy(n, n) + [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                      for _ in range(200)], [
+            "mov r60 = r34", f"movl r19 = {0x100840}",
+            "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+# The 16-byte copy with its loads made nops (s) or reading one byte (f).
+def mcpyv(n, ld, step=None):
+    return [B("mii", None, "mov r62 = ar.lc", f"adds r22 = {n - 1}, r0 ;;"),
+            B("mii", "ld1 r23 = [r60], 1", "mov.i ar.lc = r22",
+              "cmp.eq p0, p6 = 0, r22 ;;"),
+            B("mmi", "st1 [r61] = r23, 1", ld, "nop.i 0", label="1"),
+            B("mib", "cmp.lt p6, p0 = 1, r22", "adds r22 = -1, r22",
+              "br.cloop.dptk.few 1b ;;"),
+            B("mii", f"adds r60 = {-1}, r60",
+              f"adds r61 = {(step or n) - n}, r61", "mov.i ar.lc = r62 ;;")]
+for v, ld in (("s", "nop.m 0"), ("f", "(p6) ld1 r23 = [r60]")):
+    for n in ((4, 8, 16) if v == "f" else
+              (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 24,
+               32)):
+        BLOCKS[f"mcpy{v}_n{n}_gap200"] = (
+            mcpyv(n, ld) + [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                            for _ in range(200)], [
+                "mov r60 = r34", f"movl r19 = {0x100840}",
+                "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+for n in range(1, 33):
+    BLOCKS[f"mcpya_n{n}_gap200"] = (
+        mcpyv(n, "nop.m 0", 64) +
+        [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+         for _ in range(200)], [
+            "mov r60 = r34", f"movl r19 = {0x100840}",
+            "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+# n st1s a group apart, no loop, into a fresh 64 bytes, then 200 groups.
+for n in range(1, 33):
+    BLOCKS[f"stu_n{n}_gap200"] = (
+        [B("mmi", "st1 [r61] = r40, 1", None, "nop.i 0 ;;")
+         for _ in range(n)] +
+        [B("mii", None, f"adds r61 = {64 - n}, r61", "nop.i 0 ;;")] +
+        [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+         for _ in range(200)], [
+            f"movl r19 = {0x100840}",
+            "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+# A one-group br.cloop loop of n passes around one store, then 200 groups:
+# which stores slow it?  "2g" puts a stop between the store and the branch.
+LST = {"b1": ("st1 [r61] = r40, 1", 1), "b8": ("st1 [r61] = r40, 8", 8),
+       "b0": ("st1 [r61] = r40", 0), "d8": ("st8 [r61] = r40, 8", 8),
+       "w4": ("st4 [r61] = r40, 4", 4), "h2": ("st2 [r61] = r40, 2", 2),
+       "b2": ("st1 [r61] = r40, 2", 2), "n": ("nop.m 0", 0)}
+def lst(st, inc, n, two, ec=None):
+    pre = ([] if ec is None else
+           [B("mii", None, "nop.i 0", "nop.i 0 ;;")] if ec == "nop" else
+           [B("mii", None, "mov r63 = ar.ec", "nop.i 0 ;;")] if ec == "rd" else
+           [B("mii", None, f"mov.i ar.ec = {ec}", "nop.i 0 ;;")])
+    body = ([B("mmi", st, None, "nop.i 0 ;;", label="1"),
+             B("mib", None, None, "br.cloop.dptk.few 1b ;;")] if two else
+            [B("mib", st, None, "br.cloop.dptk.few 1b ;;", label="1")])
+    return pre + ([B("mii", None, "mov r62 = ar.lc", f"adds r22 = {n - 1}, r0 ;;"),
+             B("mii", None, "mov.i ar.lc = r22", "nop.i 0 ;;")] + body +
+            [B("mii", None, f"adds r61 = {64 * 4 - inc * n}, r61",
+               "mov.i ar.lc = r62 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(200)])
+# The same loop one or two bundles long (one group either way: memcpy's byte
+# loop is two), after k idle groups to move it across a 32-byte fetch pair.
+def lal(k, nb, n, h="dptk"):
+    br = f"br.cloop.{h}.few 1b ;;"
+    body = ([B("mii", None, None, "nop.i 0", label="1"),
+             B("mib", None, None, br)] if nb == 2 else
+            [B("mib", None, None, br, label="1")])
+    return ([B("mii", None, "nop.i 0", "nop.i 0 ;;")] * k +
+            [B("mii", None, "mov r62 = ar.lc", f"adds r22 = {n - 1}, r0 ;;"),
+             B("mii", None, "mov.i ar.lc = r22", "nop.i 0 ;;")] + body +
+            [B("mii", None, "nop.i 0", "mov.i ar.lc = r62 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(200)])
+# g groups a pass: does the loop predictor call a .dptk exit?
+def lag(g, n, h):
+    body = ([B("mii", None, "nop.i 0", "nop.i 0 ;;") for _ in range(g - 1)] +
+            [B("mib", None, None, f"br.cloop.{h}.few 1b ;;")])
+    body[0].label = "1"
+    return ([B("mii", None, "mov r62 = ar.lc", f"adds r22 = {n - 1}, r0 ;;"),
+             B("mii", None, "mov.i ar.lc = r22", "nop.i 0 ;;")] + body +
+            [B("mii", None, "nop.i 0", "mov.i ar.lc = r62 ;;")] +
+            [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+             for _ in range(200)])
+for h in ("sptk", "dptk"):
+    for g in (2, 3, 6):
+        for n in (4, 8, 16, 32, 64):
+            BLOCKS[f"lag{h}_g{g}_n{n}"] = (lag(g, n, h), [
+                "mov r40 = 1", "mov r41 = 0"])
+for h in ("sptk", "dpnt", "spnt"):
+    for k in range(2):
+        for nb in (1, 2):
+            for n in (4, 8, 16, 32):
+                BLOCKS[f"lah{h}{k}_b{nb}_n{n}"] = (lal(k, nb, n, h), [
+                    "mov r40 = 1", "mov r41 = 0"])
+for k in range(4):
+    for nb in (1, 2):
+        for n in (2, 3, 4, 6, 8, 12, 16, 24, 32):
+            BLOCKS[f"lal{k}_b{nb}_n{n}"] = (lal(k, nb, n), [
+                "mov r40 = 1", "mov r41 = 0"])
+for ec in ("nop", "rd", 0, 1, 2):
+    for n in (4, 8, 12, 16):
+        BLOCKS[f"lsx{ec}_n{n}"] = (
+            lst("nop.m 0", 0, n, False, ec), [
+                f"movl r19 = {0x100840}",
+                "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+for ec in (0, 3):
+    for two in (False, True):
+        for n in (2, 4, 6, 8, 12, 16, 24, 32):
+            BLOCKS[f"lse{ec}{'2g' if two else ''}_n{n}"] = (
+                lst("st1 [r61] = r40, 1", 1, n, two, ec), [
+                    f"movl r19 = {0x100840}",
+                    "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+for k, (st, inc) in LST.items():
+    for two in (False, True):
+        for n in (4, 8, 16):
+            BLOCKS[f"lst{'2g' if two else ''}_{k}_n{n}"] = (
+                lst(st, inc, n, two), [
+                    f"movl r19 = {0x100840}",
+                    "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+for g in (16, 32, 64, 160):
+    BLOCKS[f"mcpy_n16_o840_gap{g}"] = (
+        mcpy(16, 16) + [B("mii", None, "add r41 = r41, r40", "nop.i 0 ;;")
+                        for _ in range(g)], [
+            "mov r60 = r34", f"movl r19 = {0x100840}",
+            "add r61 = r34, r19", "mov r40 = 1", "mov r41 = 0"])
+
 # MiBench aes's CBC step in decfile, clang's bundles as built, branches made
 # nops: xor the 16 bytes decrypt wrote at r43 into the chaining block at
 # r37 + 0..15 (r37, r38, r35, r47-r58, r60 hold its byte addresses), a
