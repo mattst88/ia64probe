@@ -95,6 +95,41 @@ def late(br, groups, n, ec, src):
     return out
 
 
+def daxpy(n, ec, four=False):
+    out = [B("mii", None, "mov r62 = ar.lc", f"adds r22 = {n - 1}, r0 ;;"),
+           B("mii", None, "mov.i ar.lc = r22", f"mov.i ar.ec = {ec} ;;"),
+           B("mii", None, "mov pr.rot = 0x10000", "nop.i 0 ;;"),
+           B("mfi", None, "fma f32 = f6, f6, f0", "nop.i 0 ;;", label="1")]
+    if four:
+        out[-1] = B("mfi", None, "fma f32 = f6, f6, f0", None, label="1")
+        out += [B("mfi", None, "fma f34 = f6, f6, f0", "nop.i 0 ;;")]
+    out += [B("mmf", None, None, "fma f33 = f6, f6, f0"),
+           B("mbb", None, "nop.b 0", "br.ctop.sptk.few 1b ;;"),
+           B("mii", None, "mov.i ar.lc = r62", "nop.i 0 ;;")]
+    return out
+
+
+def daxpy_call(n, ec, alloc, four=False):
+    """daxpy() in a callee, entered by br.call through b6, whose frame is
+    the four outputs of the setup's alloc."""
+    loop = daxpy(n, ec, four)
+    loop[0] = B("mii", "alloc r34 = ar.pfs, 0, 4, 0, 0" if alloc else None,
+                "mov r32 = ar.lc" if not alloc else "mov r35 = ar.lc",
+                f"adds r22 = {n - 1}, r0 ;;", label="2")
+    loop[-1] = B("mii", None,
+                 "mov.i ar.lc = r35" if alloc else "mov.i ar.lc = r32",
+                 "nop.i 0 ;;")
+    pad = [B("mii", None, None, "nop.i 0 ;;")]
+    if four:
+        # The loop's first bundle starts a pair, as clang aligns it.
+        loop = loop[:3] + pad + loop[3:]
+    out = ([B("mib", None, None, "br.call.sptk.many b6 = 2f ;;"),
+            B("mib", None, None, "br.cond.sptk.few 3f ;;")] + loop +
+           [B("mib", None, None, "br.ret.sptk.many b6 ;;"),
+            B("mmi", None, None, "nop.i 0 ;;", label="3")])
+    return out + pad * (len(out) % 2)
+
+
 def kernels():
     ks = []
     for br in ("br.ctop", "br.cloop"):
@@ -144,4 +179,40 @@ def kernels():
                                ["mov f6 = f1"],
                                meta={"br": br, "groups": groups, "n": n,
                                      "ec": ec, "src": src}, bodies=2)
+    # The same loop in a callee, with and without an alloc.
+    for alloc in (0, 1):
+        for n in range(2, 26):
+            ks += pair(f"ctopc_a{alloc}_n{n}", "ctop", daxpy_call(n, 10, alloc),
+                       ["alloc r2 = ar.pfs, 2, 60, 4, 0", "mov f6 = f1"],
+                       meta={"br": "br.ctop", "groups": 2, "n": n, "ec": 10,
+                             "alloc": alloc}, bodies=2)
+    # Its four bundles, as clang lays them out, called (with ar.ec 10 or 1)
+    # or inline.
+    for n in range(2, 33):
+        for ec in (10, 1):
+            ks += pair(f"ctopc4{'' if ec == 10 else '_e1'}_n{n}", "ctop",
+                       daxpy_call(n, ec, 1, True),
+                       ["alloc r2 = ar.pfs, 2, 60, 4, 0", "mov f6 = f1"],
+                       meta={"br": "br.ctop", "groups": 2, "n": n, "ec": ec},
+                       bodies=2)
+        loop = daxpy(n, 10, True)
+        pad = [B("mii", None, None, "nop.i 0 ;;")]
+        ks += pair(f"ctopi4_n{n}", "ctop", loop[:3] + pad + loop[3:] + pad,
+                   ["mov f6 = f1"],
+                   meta={"br": "br.ctop", "groups": 2, "n": n, "ec": 10},
+                   bodies=2)
+    # linpack's daxpy as clang pipelines it: three bundles in two groups.
+    for ec in (0, 10):
+        for n in range(2, 26):
+            ks += pair(f"ctopd_e{ec}_n{n}", "ctop", daxpy(n, ec),
+                       ["mov f6 = f1"],
+                       meta={"br": "br.ctop", "groups": 2, "n": n, "ec": ec},
+                       bodies=2)
+    # linpack's daxpy: a 2-group kernel with ar.ec 10, short trip counts.
+    for ec in (1, 2, 4, 6, 10):
+        for n in (2, 4, 6, 8, 12, 16, 32, 64):
+            ks += pair(f"ctopk_g2_e{ec}_n{n}", "ctop",
+                       sweep("br.ctop", 2, n, ec), ["mov f6 = f1"],
+                       meta={"br": "br.ctop", "groups": 2, "n": n, "ec": ec},
+                       bodies=2)
     return ks
