@@ -21,6 +21,7 @@ MODULES = [
     "tests_memory",
     "tests_rse",
     "tests_icache",
+    "tests_itlb",
     "tests_branch",
     "tests_stld",
     "tests_taken",

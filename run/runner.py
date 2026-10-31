@@ -22,7 +22,8 @@ grep '^cpu[0-9]' /proc/stat > %(d)s/s1; sleep 1
 grep '^cpu[0-9]' /proc/stat > %(d)s/s2
 paste %(d)s/s1 %(d)s/s2 | awk '{t=0; for (i=2;i<=11;i++) t+=$(i+11)-$i;
   n=substr($1,4); busy[n]=1-($16-$5)/t}
-  END {best=-1; for (c=0;c<16;c+=2) { b=busy[c]+busy[c+1];
+  END {best=-1; smt=length(busy)==16 ? 2 : 1;
+    for (c=0;c<length(busy);c+=smt) { b=busy[c]+(smt>1 ? busy[c+1] : 0);
     if (best<0 || b<bb) {best=c; bb=b} } print best}'
 """
 
