@@ -309,4 +309,19 @@ def kernels():
                            strip(rename(body, op, base), "stfd"),
                            setup(*regs, lag, bo, co), {}, bodies=8,
                            iters=60)
+    # Does an A-type op in the M slot before a load pair keep the pair off
+    # the L2 bank together?  gk1 has one and gk2 does not.
+    K1N = [("mfi", "nop.m 0", *K1[0][2:])] + K1[1:]
+    K1I = [("mfi", "nop.m 0", K1[0][2], "mov r37 = r3")] + K1[1:]
+    K2M = [("mfi", "mov r43 = r3", "fma.d f39 = f8, f14, f0",
+            "adds r3 = -3, r3"), K2[0]] + [
+        ("mfi", "nop.m 0", "nop.f 0", "nop.i 0")] + K2[2:]
+    for nm, body, regs, lag in (("gkx1_nop", K1N, (30, 9, 31, 8), 32),
+                                ("gkx1_inI", K1I, (30, 9, 31, 8), 32),
+                                ("gkx2_movfirst", K2M, (30, 31, 9, 8), 48)):
+        ks += pair(nm + "_nost", "gemmk", strip(body, "stfd"),
+                   setup(*regs, lag), {}, bodies=8, iters=60)
+        ks += pair(nm + "_nost_lren", "gemmk",
+                   strip(rename(body, "ldfd", 80), "stfd"),
+                   setup(*regs, lag), {}, bodies=8, iters=60)
     return ks
