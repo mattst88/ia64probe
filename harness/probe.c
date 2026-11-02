@@ -23,13 +23,21 @@
  * end of the store streams breaks every later kernel chasing a ring.
  */
 #define _GNU_SOURCE
+#ifdef __hpux
+#include <sys/mpctl.h>
+#include <setjmp.h>
+#include <signal.h>
+#define CLOCK_MONOTONIC CLOCK_REALTIME	/* warm() only spins with it */
+#else
 #include <getopt.h>
 #include <sched.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "probe.h"
 #include "kernels.inc"
@@ -80,6 +88,18 @@ find(const char *name, unsigned bodies)
 			return &kernels[i];
 	return NULL;
 }
+
+#ifdef __hpux
+/* HP-UX delivers SIGBUS for an unaligned access where Linux fixes it up,
+ * so a kernel that makes one is reported as a fault and skipped. */
+static sigjmp_buf fault_jmp;
+
+static void
+fault(int sig)
+{
+	siglongjmp(fault_jmp, sig);
+}
+#endif
 
 static volatile unsigned long warm_sink;
 
@@ -140,6 +160,12 @@ main(int argc, char **argv)
 			return 2;
 		}
 	}
+#ifdef __hpux
+	if (cpu >= 0 && mpctl(MPC_SETPROCESS_FORCE, cpu, MPC_SELFPID) == -1) {
+		perror("mpctl");
+		return 1;
+	}
+#else
 	if (cpu >= 0) {
 		cpu_set_t set;
 
@@ -150,6 +176,16 @@ main(int argc, char **argv)
 			return 1;
 		}
 	}
+#endif
+#ifdef __hpux
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = fault;
+	sigaction(SIGBUS, &sa, NULL);
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGILL, &sa, NULL);
+#endif
 	unsigned char *scratch = scratch_init();
 	const struct kernel *calb = find("cal_add", 32);
 	const struct kernel *cal2b = find("cal_add", 64);
@@ -189,6 +225,16 @@ main(int argc, char **argv)
 			fflush(stdout);
 			continue;
 		}
+#ifdef __hpux
+		int sig = sigsetjmp(fault_jmp, 1);
+
+		if (sig) {
+			printf("{\"name\": \"%s\", \"bodies\": %u, "
+			       "\"fault\": %d}\n", kb->name, kb->bodies, sig);
+			fflush(stdout);
+			continue;
+		}
+#endif
 		uint64_t mn[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 		for (unsigned r = 0; r < reps; r++) {
 			uint64_t t[4];
