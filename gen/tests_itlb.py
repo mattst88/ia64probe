@@ -40,4 +40,13 @@ def kernels():
             meta = {"n": n, "stride": stride}
             ks += [Kernel(name, "itlb", b, 1, meta=meta, iters=4096),
                    Kernel(name, "itlb", b, 2, meta=meta, iters=4096)]
+    # The L2 ITLB: one chain of n 16 KB pages, each branch still in its own
+    # L1I set modulo 64 (L1I holds 256 lines), so past the L1 ITLB only the
+    # second level and the VHPT walk change the cost per branch.
+    for n in (64, 96, 112, 120, 124, 128, 132, 136, 144, 160, 192, 224, 255):
+        name = f"ic_itlb2_s16448_p{n}"
+        b = body(n, 16448)
+        meta = {"n": n, "stride": 16448}
+        ks += [Kernel(name, "itlb", b, 1, meta=meta, iters=1024),
+               Kernel(name, "itlb", b, 2, meta=meta, iters=1024)]
     return ks
